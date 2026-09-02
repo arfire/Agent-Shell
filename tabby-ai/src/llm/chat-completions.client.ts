@@ -138,6 +138,46 @@ export class ChatCompletionsClient {
         }
     }
 
+    async listModels (settings: AIConfig['llm'], signal?: AbortSignal): Promise<string[]> {
+        if (!settings.baseURL.trim()) {
+            throw new Error('API Base URL is required')
+        }
+        const controller = new AbortController()
+        const timeout = setTimeout(() => controller.abort(new Error('Model list request timed out')), settings.timeout)
+        const abort = () => controller.abort(signal?.reason)
+        signal?.addEventListener('abort', abort, { once: true })
+        try {
+            const response = await fetch(`${settings.baseURL.replace(/\/$/, '')}/models`, {
+                method: 'GET',
+                headers: settings.apiKey ? { Authorization: `Bearer ${settings.apiKey}` } : {},
+                signal: controller.signal,
+            })
+            if (!response.ok) {
+                throw new Error(`Model list request failed (${response.status}): ${(await response.text()).slice(0, 500)}`)
+            }
+            const data = await response.json()
+            if (!Array.isArray(data?.data)) {
+                throw new Error('The /models response does not contain a data array')
+            }
+            const modelIds = data.data
+                .map((item: unknown): string|null => {
+                    if (typeof item === 'string') {
+                        return item
+                    }
+                    if (item && typeof item === 'object' && 'id' in item && typeof item.id === 'string') {
+                        return item.id
+                    }
+                    return null
+                })
+                .filter((id: string|null): id is string => typeof id === 'string' && !!id.trim())
+            return [...new Set<string>(modelIds)]
+                .sort((a, b) => a.localeCompare(b))
+        } finally {
+            clearTimeout(timeout)
+            signal?.removeEventListener('abort', abort)
+        }
+    }
+
     private async consumeStream (body: ReadableStream<Uint8Array>, handlers: StreamHandlers): Promise<ChatCompletionResult> {
         const reader = body.getReader()
         const decoder = new TextDecoder()

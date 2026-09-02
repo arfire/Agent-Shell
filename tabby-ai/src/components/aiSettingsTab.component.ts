@@ -16,7 +16,10 @@ export class AISettingsTabComponent {
     loadError: string|null = null
     saving = false
     testing = false
-    testResult: { success: boolean, message: string }|null = null
+    loadingModels = false
+    connectionResult: { success: boolean, message: string }|null = null
+    modelListResult: { success: boolean, message: string }|null = null
+    availableModels: string[] = []
     restartRequired = false
 
     constructor (
@@ -33,20 +36,39 @@ export class AISettingsTabComponent {
             return
         }
         this.testing = true
-        this.testResult = null
+        this.connectionResult = null
         try {
             const result = await this.client.testConnection(this.model.llm)
             const reply = result.content ? ` Reply: ${result.content}` : ''
-            this.testResult = {
+            this.connectionResult = {
                 success: true,
                 message: `Model ${result.model} responded successfully.${reply}`,
             }
-            this.toastr.success(this.testResult.message, 'AI model test successful')
+            this.toastr.success(this.connectionResult.message, 'AI connection successful')
         } catch (error) {
-            this.testResult = { success: false, message: String(error) }
-            this.toastr.error(this.testResult.message, 'AI model test failed')
+            this.connectionResult = { success: false, message: String(error) }
+            this.toastr.error(this.connectionResult.message, 'AI connection failed')
         } finally {
             this.testing = false
+        }
+    }
+
+    async loadModels (): Promise<void> {
+        if (!this.model || this.loadingModels) {
+            return
+        }
+        this.loadingModels = true
+        this.availableModels = []
+        this.modelListResult = null
+        try {
+            this.availableModels = await this.client.listModels(this.model.llm)
+            this.modelListResult = this.availableModels.length
+                ? { success: true, message: `${this.availableModels.length} model(s) returned by /models.` }
+                : { success: true, message: 'The /models endpoint returned no models.' }
+        } catch (error) {
+            this.modelListResult = { success: false, message: String(error) }
+        } finally {
+            this.loadingModels = false
         }
     }
 
@@ -68,7 +90,9 @@ export class AISettingsTabComponent {
 
     markChanged (): void {
         this.restartRequired = false
-        this.testResult = null
+        this.connectionResult = null
+        this.modelListResult = null
+        this.availableModels = []
     }
 
     restart (): void {
