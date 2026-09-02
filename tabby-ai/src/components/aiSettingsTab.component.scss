@@ -1,0 +1,42 @@
+.model-picker-button {
+    min-width: 4.5rem;
+    white-space: nowrap;
+}
+
+.model-picker {
+    margin-top: .5rem;
+}
+
+.model-picker-list {
+    width: 100%;
+    padding: .2rem;
+    border-color: var(--bs-border-color, rgba(127, 127, 127, .35));
+    border-radius: .35rem;
+    background: var(--bs-body-bg, transparent);
+    color: inherit;
+    font-family: var(--bs-font-monospace, monospace);
+
+    option {
+        padding: .4rem .55rem;
+        border-radius: .25rem;
+    }
+}
+
+.model-picker-message {
+    padding: .55rem .7rem;
+    border: 1px solid var(--bs-border-color, rgba(127, 127, 127, .35));
+    border-radius: .35rem;
+    color: var(--bs-secondary-color, rgba(255, 255, 255, .65));
+    font-size: .875rem;
+}
+
+.model-picker-error {
+    border-color: var(--bs-danger, #dc3545);
+    color: var(--bs-danger, #dc3545);
+}
+
+.model-picker-summary {
+    margin-top: .3rem;
+    color: var(--bs-secondary-color, rgba(255, 255, 255, .65));
+    font-size: .8rem;
+}

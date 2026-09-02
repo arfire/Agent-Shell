@@ -8,6 +8,7 @@ import { ChatCompletionsClient } from '../llm/chat-completions.client'
 
 @Component({
     templateUrl: './aiSettingsTab.component.pug',
+    styleUrls: ['./aiSettingsTab.component.scss'],
 })
 export class AISettingsTabComponent {
     @HostBinding('class.content-box') true
@@ -20,7 +21,12 @@ export class AISettingsTabComponent {
     connectionResult: { success: boolean, message: string }|null = null
     modelListResult: { success: boolean, message: string }|null = null
     availableModels: string[] = []
+    modelPickerVisible = false
     restartRequired = false
+
+    get modelListSize (): number {
+        return Math.min(Math.max(this.availableModels.length, 1), 6)
+    }
 
     constructor (
         public configService: AIConfigService,
@@ -57,6 +63,7 @@ export class AISettingsTabComponent {
         if (!this.model || this.loadingModels) {
             return
         }
+        this.modelPickerVisible = true
         this.loadingModels = true
         this.availableModels = []
         this.modelListResult = null
@@ -70,6 +77,15 @@ export class AISettingsTabComponent {
         } finally {
             this.loadingModels = false
         }
+    }
+
+    selectModel (modelId: string): void {
+        if (!this.model) {
+            return
+        }
+        this.model.llm.model = modelId
+        this.restartRequired = false
+        this.connectionResult = null
     }
 
     async save (): Promise<void> {
@@ -93,6 +109,7 @@ export class AISettingsTabComponent {
         this.connectionResult = null
         this.modelListResult = null
         this.availableModels = []
+        this.modelPickerVisible = false
     }
 
     restart (): void {

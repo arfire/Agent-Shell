@@ -21,25 +21,35 @@ ng-container(*ngIf='model')
     .form-line
         .header
             .title Model
-        input.form-control(type='text', [(ngModel)]='model.llm.model', (ngModelChange)='markChanged()')
-
-    .form-line
-        .header.d-flex.align-items-center
-            .title Available upstream models
-            button.btn.btn-sm.btn-outline-secondary.ms-auto(
+        .input-group
+            input.form-control(type='text', [(ngModel)]='model.llm.model', (ngModelChange)='markChanged()')
+            button.btn.btn-outline-secondary.model-picker-button(
                 type='button',
                 (click)='loadModels()',
-                [disabled]='loadingModels || !model.llm.baseURL'
+                [disabled]='loadingModels || !model.llm.baseURL',
+                title='Read available model IDs from /models'
             )
-                span(*ngIf='!loadingModels') Load /models
+                span(*ngIf='!loadingModels') Models
                 span(*ngIf='loadingModels') Loading…
-        .alert.mt-2.mb-2(
-            *ngIf='modelListResult',
-            [class.alert-success]='modelListResult.success',
-            [class.alert-danger]='!modelListResult.success'
-        ) {{ modelListResult.message }}
-        select.form-control(*ngIf='availableModels.length', size='8', aria-label='Available upstream model IDs')
-            option(*ngFor='let modelId of availableModels') {{ modelId }}
+        .model-picker(*ngIf='modelPickerVisible')
+            .model-picker-message(*ngIf='loadingModels') Reading available models…
+            select.form-select.model-picker-list(
+                *ngIf='!loadingModels && availableModels.length',
+                [ngModel]='model.llm.model',
+                (ngModelChange)='selectModel($event)',
+                [attr.size]='modelListSize',
+                aria-label='Available upstream model IDs'
+            )
+                option(*ngFor='let modelId of availableModels', [value]='modelId') {{ modelId }}
+            .model-picker-summary(*ngIf='!loadingModels && availableModels.length')
+                | {{ availableModels.length }} model(s) returned by /models. Select one to use it.
+            .model-picker-message(
+                *ngIf='!loadingModels && modelListResult && !modelListResult.success',
+                class='model-picker-error'
+            ) {{ modelListResult.message }}
+            .model-picker-message(
+                *ngIf='!loadingModels && modelListResult && modelListResult.success && !availableModels.length'
+            ) No models were returned by /models.
 
     .form-line
         .header
