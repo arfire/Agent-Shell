@@ -11,7 +11,12 @@ import { ElectronHostWindow } from './hostWindow.service'
 import { ShellIntegrationService } from './shellIntegration.service'
 import { ElectronHostAppService } from './hostApp.service'
 import { configPath } from '../../../app/lib/config'
-const fontManager = require('fontmanager-redux') // eslint-disable-line
+let fontManager: any = null
+try {
+    fontManager = require('fontmanager-redux') // eslint-disable-line
+} catch (error) {
+    console.warn('Native system font enumeration is unavailable:', error)
+}
 
 /* eslint-disable block-scoped-var */
 
@@ -94,6 +99,9 @@ export class ElectronPlatformService extends PlatformService {
 
     async isProcessRunning (name: string): Promise<boolean> {
         if (this.hostApp.platform === Platform.Windows) {
+            if (!windowsProcessTreeNative) { // eslint-disable-line block-scoped-var
+                return false
+            }
             return new Promise<boolean>(resolve => {
                 windowsProcessTreeNative.getProcessList(list => { // eslint-disable-line block-scoped-var
                     resolve(list.some(x => x.name === name))
@@ -105,11 +113,18 @@ export class ElectronPlatformService extends PlatformService {
     }
 
     getWinSCPPath (): string|null {
-        const key = wnr.getRegistryKey(wnr.HK.CR, 'WinSCP.Url\\DefaultIcon')
-        if (key?.['']) {
-            let detectedPath = key[''].value?.split(',')[0]
-            detectedPath = detectedPath?.substring(1, detectedPath.length - 1)
-            return detectedPath
+        try {
+            if (!wnr) { // eslint-disable-line block-scoped-var
+                return null
+            }
+            const key = wnr.getRegistryKey(wnr.HK.CR, 'WinSCP.Url\\DefaultIcon') // eslint-disable-line block-scoped-var
+            if (key?.['']) {
+                let detectedPath = key[''].value?.split(',')[0]
+                detectedPath = detectedPath?.substring(1, detectedPath.length - 1)
+                return detectedPath
+            }
+        } catch (error) {
+            console.warn('WinSCP registry auto-detection is unavailable:', error)
         }
         return null
     }
@@ -208,6 +223,9 @@ export class ElectronPlatformService extends PlatformService {
 
     async listFonts (): Promise<string[]> {
         if (this.hostApp.platform === Platform.Windows || this.hostApp.platform === Platform.macOS) {
+            if (!fontManager) {
+                return []
+            }
             let fonts = await new Promise<any[]>(resolve => fontManager.getAvailableFonts(resolve))
             fonts = fonts.map(x => x.family.trim())
             return fonts

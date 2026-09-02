@@ -13,9 +13,16 @@ import type { Application } from './app'
 import { parseArgs } from './cli'
 import { parseTabbyURL, isTabbyURL } from './urlHandler'
 
-let DwmEnableBlurBehindWindow: any = null
+let DwmEnableBlurBehindWindow: any = () => undefined
 if (process.platform === 'win32') {
-    DwmEnableBlurBehindWindow = require('@tabby-gang/windows-blurbehind').DwmEnableBlurBehindWindow
+    try {
+        DwmEnableBlurBehindWindow = require('@tabby-gang/windows-blurbehind').DwmEnableBlurBehindWindow
+    } catch (error) {
+        // The optional legacy blur binding has no prebuilt binary. Keep the
+        // portable build usable on machines without Visual Studio Build Tools;
+        // Electron/Glasstron rendering continues without this legacy effect.
+        console.warn('Windows legacy blur binding is unavailable:', error)
+    }
 }
 
 export interface WindowOptions {

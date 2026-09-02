@@ -1,0 +1,52 @@
+.ai-block
+    .ai-header
+        .ai-title
+            i.fas.fa-sparkles
+            span AI
+        .ai-state {{ state }}
+        button.btn.btn-sm.btn-outline-light(*ngIf='isActive()', (click)='stop()') Stop
+
+    .ai-body
+        ng-container(*ngFor='let event of getMessages()')
+            .ai-message(*ngIf='event.type === "ai-message"') {{ event.data.content }}
+            .ai-error(*ngIf='event.type === "error"') {{ event.data.message }}
+
+        .ai-message.streaming(*ngIf='liveText') {{ liveText }}
+
+        .executed-command(*ngFor='let event of getCommands()')
+            .command-meta
+                span.badge {{ event.data.risk }}
+                span {{ event.data.reason }}
+            code $ {{ event.data.command }}
+
+        .command-card(*ngFor='let request of requests')
+            .command-meta
+                span.badge([class.badge-danger]='request.risk === "DANGEROUS"', [class.badge-warning]='request.risk === "MODIFY"') {{ request.risk }}
+                span {{ request.reason }}
+            textarea.form-control.command-input(
+                rows='2',
+                [ngModel]='getCommand(request)',
+                (ngModelChange)='setCommand(request, $event)'
+            )
+            .command-actions
+                button.btn.btn-sm.btn-secondary((click)='reject(request)') Reject
+                button.btn.btn-sm.btn-danger(
+                    *ngIf='request.confirmationsRequired > 1 && confirmations.has(request.id)',
+                    (click)='approve(request)'
+                ) Confirm execution
+                button.btn.btn-sm.btn-primary(
+                    *ngIf='request.confirmationsRequired === 1 || !confirmations.has(request.id)',
+                    (click)='approve(request)'
+                ) Execute
+
+        .command-card(*ngFor='let form of forms')
+            .command-meta {{ form.prompt }}
+            input.form-control(
+                [type]='form.kind === "password" ? "password" : "text"',
+                [ngModel]='formValues.get(form.id)',
+                (ngModelChange)='formValues.set(form.id, $event)',
+                (keyup.enter)='submitForm(form)',
+                autocomplete='off'
+            )
+            .command-actions
+                button.btn.btn-sm.btn-primary((click)='submitForm(form)') Submit

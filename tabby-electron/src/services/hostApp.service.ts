@@ -70,6 +70,17 @@ export class ElectronHostAppService extends HostAppService {
         const isPortable = !!process.env.PORTABLE_EXECUTABLE_FILE
         if (isPortable) {
             this.electron.app.relaunch({ execPath: process.env.PORTABLE_EXECUTABLE_FILE })
+        } else if (process.env.TABBY_DEV) {
+            // Development runs start Electron with the app directory and CLI
+            // flags. Preserve those arguments so an in-app restart launches
+            // Ash again instead of an empty Electron process.
+            this.electron.app.relaunch({
+                execPath: process.execPath,
+                args: [
+                    this.electron.app.getAppPath(),
+                    ...process.argv.slice(1).filter(argument => argument.startsWith('-')),
+                ],
+            })
         } else {
             let args: string[] = []
             if (this.platform === Platform.Linux) {

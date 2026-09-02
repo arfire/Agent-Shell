@@ -96,6 +96,49 @@ export class XTermFrontend extends Frontend {
     private hostApp: HostAppService
     private themes: ThemesService
 
+    /**
+     * Reserves terminal rows and anchors a DOM block to them. The rows are
+     * local-only xterm content and are never sent to the remote session.
+     */
+    registerInlineBlock (host: HTMLElement, height = 10): Promise<{ dispose: () => void }|null> {
+        if (this.isAlternateScreenActive()) {
+            return Promise.resolve(null)
+        }
+        return new Promise(resolve => {
+            this.xterm.write('\r\n'.repeat(height), () => {
+                const marker = this.xterm.registerMarker(-height)
+                if (!marker) {
+                    resolve(null)
+                    return
+                }
+                const decoration = this.xterm.registerDecoration({
+                    marker,
+                    x: 0,
+                    width: this.xterm.cols,
+                    height,
+                    layer: 'top',
+                })
+                if (!decoration) {
+                    marker.dispose()
+                    resolve(null)
+                    return
+                }
+                decoration.onRender(element => {
+                    element.classList.add('tabby-ai-decoration')
+                    element.style.zIndex = '5'
+                    element.style.overflow = 'visible'
+                    element.replaceChildren(host)
+                })
+                resolve({
+                    dispose: () => {
+                        decoration.dispose()
+                        marker.dispose()
+                    },
+                })
+            })
+        })
+    }
+
     constructor (injector: Injector) {
         super(injector)
         this.configService = injector.get(ConfigService)
@@ -185,6 +228,10 @@ export class XTermFrontend extends Frontend {
         }
 
         this.xterm.attachCustomKeyEventHandler((event: KeyboardEvent) => {
+            this.keyEvent.next(event)
+            if (event.defaultPrevented) {
+                return false
+            }
             if (this.hostApp.platform !== Platform.Web) {
                 if (
                     event.getModifierState('Meta') && event.key.toLowerCase() === 'v' ||

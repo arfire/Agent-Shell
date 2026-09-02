@@ -1,0 +1,53 @@
+h3 AI
+
+.alert.alert-warning(*ngIf='loadError')
+    strong The AI configuration could not be loaded.
+    div {{ loadError }}
+    div Safe defaults are active. Saving will replace the invalid configuration.
+
+.alert.alert-info Changes take effect after Ash is restarted.
+
+ng-container(*ngIf='model')
+    .form-line
+        .header
+            .title API Base URL
+        input.form-control(type='text', [(ngModel)]='model.llm.baseURL', (ngModelChange)='markChanged()')
+
+    .form-line
+        .header
+            .title API Key
+        input.form-control(type='password', [(ngModel)]='model.llm.apiKey', (ngModelChange)='markChanged()', autocomplete='off')
+
+    .form-line
+        .header
+            .title Model
+        input.form-control(type='text', [(ngModel)]='model.llm.model', (ngModelChange)='markChanged()')
+
+    .form-line
+        .header
+            .title Temperature
+        input.form-control(type='number', min='0', max='2', step='0.1', [(ngModel)]='model.llm.temperature', (ngModelChange)='markChanged()')
+
+    .form-line
+        .header
+            .title Request timeout (milliseconds)
+        input.form-control(type='number', min='1000', step='1000', [(ngModel)]='model.llm.timeout', (ngModelChange)='markChanged()')
+
+    .form-line
+        .header
+            .title Maximum concurrent agents
+        input.form-control(type='number', min='1', step='1', [(ngModel)]='model.agent.maxConcurrentRuns', (ngModelChange)='markChanged()')
+
+    .d-flex.gap-2
+        button.btn.btn-outline-primary((click)='testConnection()', [disabled]='testing')
+            span(*ngIf='!testing') Test connection
+            span(*ngIf='testing') Testing…
+        button.btn.btn-primary((click)='save()', [disabled]='saving')
+            span(*ngIf='!saving') Save
+            span(*ngIf='saving') Saving…
+        button.btn.btn-warning((click)='restart()', [disabled]='!restartRequired || saving') Restart Ash now
+
+    .mt-3.text-muted
+        | Advanced command detection, policy and redaction rules are stored in
+        code  data/tabby-ai/config.yaml
+        |  and also require a restart.

@@ -26,6 +26,7 @@ export abstract class Frontend {
     protected bell = new Subject<void>()
     protected contentUpdated = new Subject<void>()
     protected input = new Subject<Buffer>()
+    protected keyEvent = new Subject<KeyboardEvent>()
     protected resize = new ReplaySubject<ResizeEvent>(1)
     protected dragOver = new Subject<DragEvent>()
     protected drop = new Subject<DragEvent>()
@@ -38,6 +39,7 @@ export abstract class Frontend {
     get bell$ (): Observable<void> { return this.bell }
     get contentUpdated$ (): Observable<void> { return this.contentUpdated }
     get input$ (): Observable<Buffer> { return this.input }
+    get keyEvent$ (): Observable<KeyboardEvent> { return this.keyEvent }
     get resize$ (): Observable<ResizeEvent> { return this.resize }
     get dragOver$ (): Observable<DragEvent> { return this.dragOver }
     get drop$ (): Observable<DragEvent> { return this.drop }
@@ -55,6 +57,7 @@ export abstract class Frontend {
             this.bell,
             this.contentUpdated,
             this.input,
+            this.keyEvent,
             this.resize,
             this.dragOver,
             this.drop,

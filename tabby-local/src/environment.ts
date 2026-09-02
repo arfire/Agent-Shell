@@ -2,7 +2,11 @@ let wnr: any = null
 
 try {
     wnr = require('windows-native-registry') // eslint-disable-line @typescript-eslint/no-var-requires
-} catch { }
+    // The package defers loading its native binding until the first call.
+    wnr.getRegistryKey(wnr.HK.CU, 'Software\\Tabby\\NativeProbe')
+} catch {
+    wnr = null
+}
 
 let cachedEnvironment: Record<string, string>|null = null
 
@@ -106,6 +110,9 @@ function mergeRegistryEnv (target: Record<string, string>, source: Record<string
  * mimicking the behavior of Windows Terminal's environment refresh.
  */
 function buildWindowsEnvironment (): Record<string, string> {
+    if (!wnr) {
+        return normalizeEnv(process.env)
+    }
     const merged: Record<string, string> = {}
 
     // System env vars as base, then user and volatile overrides (Path/PATHEXT appended)

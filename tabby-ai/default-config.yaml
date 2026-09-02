@@ -1,0 +1,137 @@
+version: 1
+
+llm:
+  baseURL: "https://api.openai.com/v1"
+  apiKey: ""
+  model: ""
+  temperature: 0.2
+  timeout: 120000
+
+agent:
+  maxConcurrentRuns: 4
+  maxContextTokens: 32000
+  recentOutputLines: 5000
+
+inputDetection:
+  shellCommands:
+    - alias
+    - awk
+    - bash
+    - cat
+    - cd
+    - chmod
+    - chown
+    - cp
+    - curl
+    - cut
+    - date
+    - df
+    - dig
+    - docker
+    - du
+    - echo
+    - env
+    - exit
+    - export
+    - find
+    - free
+    - git
+    - grep
+    - head
+    - hostname
+    - ip
+    - journalctl
+    - kill
+    - less
+    - ln
+    - ls
+    - lsof
+    - mkdir
+    - mv
+    - mysql
+    - nc
+    - nginx
+    - nohup
+    - ping
+    - pkill
+    - ps
+    - pwd
+    - python
+    - python3
+    - reboot
+    - rm
+    - rmdir
+    - sed
+    - sh
+    - shutdown
+    - sleep
+    - sort
+    - ss
+    - ssh
+    - sudo
+    - systemctl
+    - tail
+    - tar
+    - tee
+    - top
+    - touch
+    - traceroute
+    - uname
+    - uniq
+    - uptime
+    - vi
+    - vim
+    - wc
+    - wget
+    - which
+    - whoami
+    - xargs
+    - zsh
+  shellPatterns:
+    - '^\s*(\./|/|~\/|\.\.\/)'
+    - '[|&;<>`]'
+    - '\$\(|\$\{|\$[A-Za-z_]'
+    - '^\s*[A-Za-z_][A-Za-z0-9_]*='
+
+policy:
+  defaultRisk: MODIFY
+  autoApprove:
+    - '^\s*(pwd|whoami|hostname|date|uptime|uname)(\s|$)'
+    - '^\s*(ls|find|stat|file|which|type)(\s|$)'
+    - '^\s*(cat|head|tail|grep|awk|sed\s+-n|cut|sort|uniq|wc)(\s|$)'
+    - '^\s*(df|du|free|ps|top\s+-b|ss|ip\s+(addr|route|link)|lsof)(\s|$)'
+    - '^\s*(docker\s+(ps|logs|inspect|stats|info|version|network\s+inspect|system\s+df))(\s|$)'
+    - '^\s*(systemctl\s+(status|is-active|is-enabled|list-units)|journalctl)(\s|$)'
+    - '^\s*(nginx\s+-t|curl\s+(-I|--head)|dig|ping|traceroute)(\s|$)'
+  requireApproval:
+    - '^\s*(systemctl\s+(start|stop|restart|reload|enable|disable))(\s|$)'
+    - '^\s*(docker\s+(start|stop|restart|network\s+connect|network\s+disconnect))(\s|$)'
+    - '^\s*(apt|apt-get|dnf|yum|pacman|apk)(\s|$)'
+    - '^\s*(cp|mv|mkdir|touch|ln|tee|chmod|chown)(\s|$)'
+    - '^\s*(ufw|firewall-cmd|iptables|nft)(\s|$)'
+  requireSecondApproval:
+    - '(^|[;&|]\s*)rm\s+(-[^\s]*r[^\s]*f|-[^\s]*f[^\s]*r)'
+    - '^\s*(mkfs|fdisk|parted|dd)(\s|$)'
+    - '^\s*(shutdown|reboot|poweroff|halt)(\s|$)'
+    - '(DROP\s+(DATABASE|TABLE)|TRUNCATE\s+TABLE)'
+    - '^\s*(iptables|nft).*\s(-F|flush)(\s|$)'
+  deny:
+    - ':\(\)\s*\{\s*:\|:&\s*\};:'
+    - '^\s*rm\s+-rf\s+/(\s|$)'
+    - '^\s*rm\s+-rf\s+/(boot|etc|home|root|usr|var)(\s|/|$)'
+
+redaction:
+  enabled: true
+  patterns:
+    - name: private-key
+      pattern: '-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----'
+      replacement: '[REDACTED_PRIVATE_KEY]'
+    - name: authorization
+      pattern: '(?i)(authorization\s*:\s*)([^\r\n]+)'
+      replacement: '$1[REDACTED]'
+    - name: secret-assignment
+      pattern: '(?i)((password|passwd|token|secret|api[_-]?key|cookie)\s*[=:]\s*)([^\s]+)'
+      replacement: '$1[REDACTED]'
+    - name: openai-key
+      pattern: '\bsk-[A-Za-z0-9_-]{16,}\b'
+      replacement: '[REDACTED_API_KEY]'

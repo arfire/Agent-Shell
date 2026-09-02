@@ -112,6 +112,14 @@ export class ElectronPTYProxy extends PTYProxy {
             }))
         }
         if (process.platform === 'win32') {
+            // The portable development build can run without the optional
+            // native process-tree binding.  Child-process discovery is only
+            // used to decide whether closing a local terminal needs an extra
+            // confirmation, so falling back to an empty list is safer than
+            // rejecting the whole close operation.
+            if (!windowsProcessTree) {
+                return []
+            }
             return new Promise<ChildProcess[]>(resolve => {
                 windowsProcessTree.getProcessTree(truePID, tree => {
                     resolve(tree ? tree.children.map(child => ({

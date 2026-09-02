@@ -12,11 +12,12 @@ import { Window, WindowOptions } from './window'
 import { pluginManager } from './pluginManager'
 import { PTYManager } from './pty'
 
-/* eslint-disable block-scoped-var */
-
+let windowsRegistry: any = null
 try {
-    var wnr = require('windows-native-registry') // eslint-disable-line @typescript-eslint/no-var-requires, no-var
-} catch (_) { }
+    windowsRegistry = require('windows-native-registry') // eslint-disable-line @typescript-eslint/no-var-requires
+} catch (error) {
+    console.warn('Windows registry helper is unavailable:', error)
+}
 
 export class Application {
     private tray?: Tray
@@ -295,11 +296,21 @@ export class Application {
     }
 
     private useBuiltinGraphics (): void {
-        if (process.platform === 'win32') {
-            const keyPath = 'SOFTWARE\\Microsoft\\DirectX\\UserGpuPreferences'
-            const valueName = app.getPath('exe')
-            if (!wnr.getRegistryValue(wnr.HK.CU, keyPath, valueName)) {
-                wnr.setRegistryValue(wnr.HK.CU, keyPath, valueName, wnr.REG.SZ, 'GpuPreference=1;')
+        if (process.platform === 'win32' && windowsRegistry) {
+            try {
+                const keyPath = 'SOFTWARE\\Microsoft\\DirectX\\UserGpuPreferences'
+                const valueName = app.getPath('exe')
+                if (!windowsRegistry.getRegistryValue(windowsRegistry.HK.CU, keyPath, valueName)) {
+                    windowsRegistry.setRegistryValue(
+                        windowsRegistry.HK.CU,
+                        keyPath,
+                        valueName,
+                        windowsRegistry.REG.SZ,
+                        'GpuPreference=1;',
+                    )
+                }
+            } catch (error) {
+                console.warn('Could not set the optional Windows GPU preference:', error)
             }
         }
     }

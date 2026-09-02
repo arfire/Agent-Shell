@@ -51,6 +51,7 @@
     "@types/node": "22"
   },
   "peerDependencies": {
+    "tabby-ai": "*",
     "tabby-community-color-schemes": "*",
     "tabby-core": "*",
     "tabby-electron": "*",

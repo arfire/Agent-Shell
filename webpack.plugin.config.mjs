@@ -85,6 +85,10 @@ export default options => {
                 },
                 {
                     test: /\.(m?)js$/,
+                    // ansi-color 0.2 uses legacy octal escapes that are valid in
+                    // its CommonJS runtime but rejected when Babel parses it as
+                    // strict-mode source. Let webpack consume that dependency as-is.
+                    exclude: /node_modules[\\/]ansi-color[\\/]/,
                     loader: 'babel-loader',
                     options: {
                         plugins: [linkerPlugin],

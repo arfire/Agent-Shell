@@ -74,6 +74,9 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
 
     @Input() showSearchPanel = false
 
+    /** Stable identifier used by tabby-ai to restore a terminal's AI history. */
+    @Input() aiSessionId?: string
+
     /** @hidden */
     @ViewChild('content') content
 

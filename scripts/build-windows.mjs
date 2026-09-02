@@ -13,7 +13,8 @@ console.log('Signing enabled:', !!keypair)
 
 builder({
     dir: true,
-    win: ['nsis', 'zip'],
+    // Ash is distributed as a single portable x64 ZIP; no installer variant.
+    win: ['zip'],
     arm64: process.env.ARCH === 'arm64',
     config: {
         extraMetadata: {

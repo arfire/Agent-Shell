@@ -91,6 +91,7 @@
     "zone.js": "^0.13.0"
   },
   "resolutions": {
+    "@electron/node-gyp": "10.2.0-electron.1",
     "*/pug": "^3",
     "lzma-native": "^8.0.6",
     "**/graceful-fs": "^4.2.4",

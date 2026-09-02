@@ -8,6 +8,29 @@ const nodeModule = require('module') // eslint-disable-line @typescript-eslint/n
 
 const nodeRequire = global['require']
 
+function loadWindowsRegistry (): any {
+    if (process.platform === 'win32') {
+        try {
+            const registry = nodeRequire('windows-native-registry')
+            // The JS wrapper loads its native binding lazily, so probe once.
+            registry.getRegistryKey(registry.HK.CU, 'Software\\Tabby\\NativeProbe')
+            return registry
+        } catch (error) {
+            console.warn('Native Windows registry integration is unavailable:', error)
+        }
+    }
+    return {
+        HK: { CR: 0x80000000, CU: 0x80000001, LM: 0x80000002, U: 0x80000003, CC: 0x80000005 },
+        REG: { SZ: 1 },
+        getRegistryKey: () => null,
+        getRegistryValue: () => null,
+        listRegistrySubkeys: () => [],
+        setRegistryValue: () => false,
+        createRegistryKey: () => false,
+        deleteRegistryKey: () => false,
+    }
+}
+
 function normalizePath (p: string): string {
     const cygwinPrefix = '/cygdrive/'
     if (p.startsWith(cygwinPrefix)) {
@@ -38,6 +61,7 @@ const cachedBuiltinModules = {
     'rxjs/operators': require('rxjs/operators'),
     'zone.js/dist/zone.js': require('zone.js'),
     'zone.js': require('zone.js'),
+    'windows-native-registry': loadWindowsRegistry(),
 }
 
 const builtinModules = [

@@ -18,6 +18,7 @@ export class RecoveryProvider extends TabRecoveryProvider<SSHTabComponent> {
             inputs: {
                 profile: this.injector.get(ProfilesService).getConfigProxyForProfile(recoveryToken.profile),
                 savedState: recoveryToken.savedState,
+                aiSessionId: recoveryToken.aiSessionId,
             },
         }
     }
