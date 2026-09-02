@@ -4,12 +4,18 @@
 }
 
 .model-picker {
-    margin-top: .5rem;
+    width: 100%;
+    max-width: 100%;
+    margin: -.25rem 0 .5rem;
 }
 
 .model-picker-list {
     width: 100%;
+    max-width: 100%;
+    max-height: 12rem;
     padding: .2rem;
+    overflow-x: hidden;
+    overflow-y: auto;
     border-color: var(--bs-border-color, rgba(127, 127, 127, .35));
     border-radius: .35rem;
     background: var(--bs-body-bg, transparent);
@@ -17,8 +23,12 @@
     font-family: var(--bs-font-monospace, monospace);
 
     option {
+        max-width: 100%;
         padding: .4rem .55rem;
+        overflow: hidden;
         border-radius: .25rem;
+        text-overflow: ellipsis;
+        white-space: nowrap;
     }
 }
 

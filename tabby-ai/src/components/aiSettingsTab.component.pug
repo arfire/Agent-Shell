@@ -31,25 +31,26 @@ ng-container(*ngIf='model')
             )
                 span(*ngIf='!loadingModels') Models
                 span(*ngIf='loadingModels') Loading…
-        .model-picker(*ngIf='modelPickerVisible')
-            .model-picker-message(*ngIf='loadingModels') Reading available models…
-            select.form-select.model-picker-list(
-                *ngIf='!loadingModels && availableModels.length',
-                [ngModel]='model.llm.model',
-                (ngModelChange)='selectModel($event)',
-                [attr.size]='modelListSize',
-                aria-label='Available upstream model IDs'
-            )
-                option(*ngFor='let modelId of availableModels', [value]='modelId') {{ modelId }}
-            .model-picker-summary(*ngIf='!loadingModels && availableModels.length')
-                | {{ availableModels.length }} model(s) returned by /models. Select one to use it.
-            .model-picker-message(
-                *ngIf='!loadingModels && modelListResult && !modelListResult.success',
-                class='model-picker-error'
-            ) {{ modelListResult.message }}
-            .model-picker-message(
-                *ngIf='!loadingModels && modelListResult && modelListResult.success && !availableModels.length'
-            ) No models were returned by /models.
+
+    .model-picker(*ngIf='modelPickerVisible')
+        .model-picker-message(*ngIf='loadingModels') Reading available models…
+        select.form-select.model-picker-list(
+            *ngIf='!loadingModels && availableModels.length',
+            [ngModel]='model.llm.model',
+            (ngModelChange)='selectModel($event)',
+            [attr.size]='modelListSize',
+            aria-label='Available upstream model IDs'
+        )
+            option(*ngFor='let modelId of availableModels', [value]='modelId', [title]='modelId') {{ modelId }}
+        .model-picker-summary(*ngIf='!loadingModels && availableModels.length')
+            | {{ availableModels.length }} model(s)
+        .model-picker-message(
+            *ngIf='!loadingModels && modelListResult && !modelListResult.success',
+            class='model-picker-error'
+        ) {{ modelListResult.message }}
+        .model-picker-message(
+            *ngIf='!loadingModels && modelListResult && modelListResult.success && !availableModels.length'
+        ) No models were returned by /models.
 
     .form-line
         .header
