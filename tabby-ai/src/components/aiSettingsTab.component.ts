@@ -16,6 +16,7 @@ export class AISettingsTabComponent {
     loadError: string|null = null
     saving = false
     testing = false
+    testResult: { success: boolean, message: string }|null = null
     restartRequired = false
 
     constructor (
@@ -32,11 +33,18 @@ export class AISettingsTabComponent {
             return
         }
         this.testing = true
+        this.testResult = null
         try {
-            await this.client.testConnection(this.model.llm)
-            this.toastr.success('The model endpoint responded successfully.', 'AI connection successful')
+            const result = await this.client.testConnection(this.model.llm)
+            const reply = result.content ? ` Reply: ${result.content}` : ''
+            this.testResult = {
+                success: true,
+                message: `Model ${result.model} responded successfully.${reply}`,
+            }
+            this.toastr.success(this.testResult.message, 'AI model test successful')
         } catch (error) {
-            this.toastr.error(String(error), 'AI connection failed')
+            this.testResult = { success: false, message: String(error) }
+            this.toastr.error(this.testResult.message, 'AI model test failed')
         } finally {
             this.testing = false
         }
@@ -60,6 +68,7 @@ export class AISettingsTabComponent {
 
     markChanged (): void {
         this.restartRequired = false
+        this.testResult = null
     }
 
     restart (): void {

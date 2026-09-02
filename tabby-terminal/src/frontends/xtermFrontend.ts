@@ -104,9 +104,13 @@ export class XTermFrontend extends Frontend {
         if (this.isAlternateScreenActive()) {
             return Promise.resolve(null)
         }
+        const reservedRows = Math.max(1, Math.floor(height))
         return new Promise(resolve => {
-            this.xterm.write('\r\n'.repeat(height), () => {
-                const marker = this.xterm.registerMarker(-height)
+            // The cursor is still on the line that triggered AI. Keep that
+            // line visible, reserve the following rows for the block and leave
+            // the cursor one row below it for subsequent SSH output.
+            this.xterm.write('\r\n'.repeat(reservedRows + 1), () => {
+                const marker = this.xterm.registerMarker(-reservedRows)
                 if (!marker) {
                     resolve(null)
                     return
@@ -115,7 +119,7 @@ export class XTermFrontend extends Frontend {
                     marker,
                     x: 0,
                     width: this.xterm.cols,
-                    height,
+                    height: reservedRows,
                     layer: 'top',
                 })
                 if (!decoration) {
@@ -126,7 +130,9 @@ export class XTermFrontend extends Frontend {
                 decoration.onRender(element => {
                     element.classList.add('tabby-ai-decoration')
                     element.style.zIndex = '5'
-                    element.style.overflow = 'visible'
+                    // Never allow a block to paint over adjacent terminal rows,
+                    // even if its DOM content becomes taller than its reservation.
+                    element.style.overflow = 'hidden'
                     element.replaceChildren(host)
                 })
                 resolve({

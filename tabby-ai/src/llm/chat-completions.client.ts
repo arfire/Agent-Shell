@@ -40,6 +40,11 @@ export interface ChatCompletionResult {
     finishReason: string|null
 }
 
+export interface ConnectionTestResult {
+    model: string
+    content: string
+}
+
 @Injectable({ providedIn: 'root' })
 export class ChatCompletionsClient {
     constructor (private configService: AIConfigService) { }
@@ -88,27 +93,48 @@ export class ChatCompletionsClient {
         }
     }
 
-    async testConnection (settings: AIConfig['llm'], signal?: AbortSignal): Promise<void> {
+    async testConnection (settings: AIConfig['llm'], signal?: AbortSignal): Promise<ConnectionTestResult> {
+        if (!settings.baseURL.trim()) {
+            throw new Error('API Base URL is required')
+        }
         if (!settings.model) {
             throw new Error('Model is required')
         }
-        const response = await fetch(`${settings.baseURL.replace(/\/$/, '')}/chat/completions`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                ...(settings.apiKey ? { Authorization: `Bearer ${settings.apiKey}` } : {}),
-            },
-            body: JSON.stringify({
-                model: settings.model,
-                messages: [{ role: 'user', content: 'Reply with OK.' }],
-                temperature: 0,
-                stream: false,
-                max_tokens: 8,
-            }),
-            signal,
-        })
-        if (!response.ok) {
-            throw new Error(`Connection test failed (${response.status}): ${(await response.text()).slice(0, 500)}`)
+        const controller = new AbortController()
+        const timeout = setTimeout(() => controller.abort(new Error('Connection test timed out')), settings.timeout)
+        const abort = () => controller.abort(signal?.reason)
+        signal?.addEventListener('abort', abort, { once: true })
+        try {
+            const response = await fetch(`${settings.baseURL.replace(/\/$/, '')}/chat/completions`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(settings.apiKey ? { Authorization: `Bearer ${settings.apiKey}` } : {}),
+                },
+                body: JSON.stringify({
+                    model: settings.model,
+                    messages: [{ role: 'user', content: 'Reply with OK.' }],
+                    temperature: 0,
+                    stream: false,
+                    max_tokens: 8,
+                }),
+                signal: controller.signal,
+            })
+            if (!response.ok) {
+                throw new Error(`Connection test failed (${response.status}): ${(await response.text()).slice(0, 500)}`)
+            }
+            const data = await response.json()
+            const choice = data?.choices?.[0]
+            if (!choice?.message) {
+                throw new Error('The endpoint returned HTTP 200 but no Chat Completions message')
+            }
+            return {
+                model: String(data.model ?? settings.model),
+                content: String(choice.message.content ?? '').trim(),
+            }
+        } finally {
+            clearTimeout(timeout)
+            signal?.removeEventListener('abort', abort)
         }
     }
 

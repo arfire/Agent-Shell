@@ -21,7 +21,21 @@ ng-container(*ngIf='model')
     .form-line
         .header
             .title Model
-        input.form-control(type='text', [(ngModel)]='model.llm.model', (ngModelChange)='markChanged()')
+        .input-group
+            input.form-control(type='text', [(ngModel)]='model.llm.model', (ngModelChange)='markChanged()')
+            button.btn.btn-outline-primary(
+                type='button',
+                (click)='testConnection()',
+                [disabled]='testing || !model.llm.baseURL || !model.llm.model'
+            )
+                span(*ngIf='!testing') Test model
+                span(*ngIf='testing') Testing…
+
+    .alert.mt-2(
+        *ngIf='testResult',
+        [class.alert-success]='testResult.success',
+        [class.alert-danger]='!testResult.success'
+    ) {{ testResult.message }}
 
     .form-line
         .header
@@ -39,9 +53,6 @@ ng-container(*ngIf='model')
         input.form-control(type='number', min='1', step='1', [(ngModel)]='model.agent.maxConcurrentRuns', (ngModelChange)='markChanged()')
 
     .d-flex.gap-2
-        button.btn.btn-outline-primary((click)='testConnection()', [disabled]='testing')
-            span(*ngIf='!testing') Test connection
-            span(*ngIf='testing') Testing…
         button.btn.btn-primary((click)='save()', [disabled]='saving')
             span(*ngIf='!saving') Save
             span(*ngIf='saving') Saving…
