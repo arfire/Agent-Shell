@@ -20,6 +20,19 @@ const INACTIVE_TAB_UNLOAD_DELAY = 1000 * 30
 const OSC_FOCUS_IN = Buffer.from('\x1b[I')
 const OSC_FOCUS_OUT = Buffer.from('\x1b[O')
 
+function detectLiveProgress (data: string): number|null {
+    const normalized = data.replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, '')
+    const hasProgressContext = normalized.includes('\r') ||
+        /\b(?:progress|downloading|uploading|transferring)\b/i.test(normalized) ||
+        /\[[^\]\r\n]{0,80}\d+(?:\.\d+)?%[^\]\r\n]{0,20}\]/.test(normalized)
+    if (!hasProgressContext) {
+        return null
+    }
+    const matches = [...normalized.matchAll(/(^|[^\d])(\d+(?:\.\d+)?)%([^\d]|$)/g)]
+    const value = matches.length ? Number(matches[matches.length - 1][2]) : NaN
+    return value > 0 && value <= 100 ? value : null
+}
+
 /**
  * A class to base your custom terminal tabs on
  */
@@ -164,6 +177,7 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
     }, 1000)
 
     private frontendWriteLock = Promise.resolve()
+    private progressClearTimer?: ReturnType<typeof setTimeout>
 
     get input$ (): Observable<Buffer> {
         if (!this.frontend) {
@@ -509,14 +523,16 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
         }
 
         if (this.config.store.terminal.detectProgress) {
-            const percentageMatch = /(^|[^\d])(\d+(\.\d+)?)%([^\d]|$)/.exec(data)
-            if (!this.alternateScreenActive && percentageMatch) {
-                const percentage = percentageMatch[3] ? parseFloat(percentageMatch[2]) : parseInt(percentageMatch[2])
-                if (percentage > 0 && percentage <= 100) {
-                    this.setProgress(percentage)
+            const percentage = this.alternateScreenActive ? null : detectLiveProgress(data)
+            if (percentage !== null) {
+                this.setProgress(percentage)
+                if (this.progressClearTimer) {
+                    clearTimeout(this.progressClearTimer)
                 }
-            } else {
-                this.setProgress(null)
+                this.progressClearTimer = setTimeout(() => {
+                    this.progressClearTimer = undefined
+                    this.setProgress(null)
+                }, percentage === 100 ? 300 : 2000)
             }
         }
 
@@ -615,6 +631,9 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
     /** @hidden */
     ngOnDestroy (): void {
         super.ngOnDestroy()
+        if (this.progressClearTimer) {
+            clearTimeout(this.progressClearTimer)
+        }
         this.stopSpinner()
     }
 

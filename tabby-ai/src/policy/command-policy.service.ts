@@ -58,6 +58,18 @@ export class CommandPolicyService {
         if (rule) {
             return { risk: 'DANGEROUS', reason: 'This command requires two confirmations.', matchedRule: rule }
         }
+        if (readsSensitiveFile(segment)) {
+            return {
+                risk: 'DENY',
+                reason: 'AI commands cannot read known credential files. Ask the user for only the required value through a local secret form.',
+            }
+        }
+        if (readsConfigurationFile(segment)) {
+            return {
+                risk: 'DANGEROUS',
+                reason: 'This command may transmit configuration contents to the model and requires explicit confirmation.',
+            }
+        }
         if (containsDynamicExecution(segment)) {
             return {
                 risk: maxRisk(policy.defaultRisk, 'DANGEROUS'),
@@ -164,6 +176,20 @@ export function splitShellCommands (source: string): string[] {
 
 function containsDynamicExecution (command: string): boolean {
     return /(^|\s)(eval|source|\.)\s|`|\$\(|\bxargs\b.*\b(sh|bash|zsh)\b/i.test(command)
+}
+
+function readsSensitiveFile (command: string): boolean {
+    if (!/^\s*(?:sudo\s+)?(?:cat|head|tail|less|more|grep|awk|sed|strings|xxd|od|base64|jq|yq|cp|rsync|scp)\b/i.test(command)) {
+        return false
+    }
+    return /(?:\/etc\/(?:shadow|gshadow)|\/proc\/\d+\/environ|(?:~|\/root|\/home\/[^/\s]+)\/\.ssh(?:\/|\s|$)|(?:~|\/root|\/home\/[^/\s]+)\/\.(?:aws|azure|config\/gcloud)(?:\/|\s|$)|(?:~|\/root|\/home\/[^/\s]+)\/\.kube\/config|(?:~|\/root|\/home\/[^/\s]+)\/\.(?:docker\/config\.json|npmrc|pypirc|netrc)|(?:^|[\s'"=\/])\.env(?:\.[^/\s]+)?|(?:^|[\s'"=\/])(?:credentials?|secrets?)(?:\.[^/\s]+)?)(?=[\s'";|&]|$)/i.test(command)
+}
+
+function readsConfigurationFile (command: string): boolean {
+    if (!/^\s*(?:sudo\s+)?(?:cat|head|tail|less|more|grep|awk|sed|strings|xxd|od|base64|jq|yq)\b/i.test(command)) {
+        return false
+    }
+    return /(?:^|[\s'"=\/])(?:config(?:uration)?|settings?)(?:\.[A-Za-z0-9._-]+)?(?=[\s'";|&]|$)|\.(?:conf|ini|toml|ya?ml|json)(?=[\s'";|&]|$)/i.test(command)
 }
 
 function containsStateChangingRedirection (command: string): boolean {

@@ -17,6 +17,9 @@ try {
     $env:COREPACK_HOME = Join-Path $cacheRoot 'corepack'
     $env:YARN_CACHE_FOLDER = Join-Path $cacheRoot 'yarn'
     $env:NPM_CONFIG_CACHE = Join-Path $cacheRoot 'npm'
+    # Keep development test runs isolated from %APPDATA% just like the
+    # packaged portable ZIP. All persistent Electron and Ash state stays here.
+    $env:TABBY_DATA_DIRECTORY = Join-Path $repoRoot 'data'
     $env:Path = "$(Join-Path $repoRoot 'scripts\.bin');$env:Path"
 
     Write-Host 'Starting Ash from source. Close the Ash window to return to this terminal.'

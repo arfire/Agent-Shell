@@ -116,6 +116,15 @@ try {
         foreach ($plugin in $Plugins) {
             Sync-BuiltinPlugin $plugin
         }
+        # Fast packaging rebuilds only selected plugins, but every bundled
+        # manifest must still advertise the common Tabby base version.
+        foreach ($bundledPlugin in Get-ChildItem -LiteralPath (Join-Path $repoRoot 'builtin-plugins') -Directory) {
+            $sourceManifest = Join-Path (Join-Path $repoRoot $bundledPlugin.Name) 'package.json'
+            $targetManifest = Join-Path $bundledPlugin.FullName 'package.json'
+            if (Test-Path -LiteralPath $sourceManifest) {
+                Copy-Item -LiteralPath $sourceManifest -Destination $targetManifest -Force
+            }
+        }
 
         if (-not (Test-Path -LiteralPath $signTool)) {
             $downloadRoot = Join-Path $cacheRoot 'downloads'

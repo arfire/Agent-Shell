@@ -3,6 +3,7 @@ import * as crypto from 'crypto'
 import { SessionMiddleware } from 'tabby-terminal'
 
 import { AIInputMiddleware } from './ai-input.middleware'
+import { detectInteractivePrompt, InteractivePromptKind } from './interactive-prompt'
 
 interface PendingCommand {
     beginMarker: string
@@ -19,36 +20,14 @@ interface PendingCommand {
     started: boolean
     signal?: AbortSignal
     abortHandler?: () => void
+    outputFilter?: (content: string) => string
 }
 
-export type InteractivePromptKind = 'password'|'yes-no'|'text'
+export { InteractivePromptKind } from './interactive-prompt'
 
 export interface CommandExecutionResult {
     output: string
     exitCode: number
-}
-
-function stripTerminalControls (content: string): string {
-    return content
-        .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '')
-        .replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, '')
-}
-
-function detectInteractivePrompt (content: string): { prompt: string, kind: InteractivePromptKind }|null {
-    const normalized = stripTerminalControls(content).replace(/\r(?!\n)/g, '\n')
-    const password = /([^\r\n]*(?:password|passphrase|密码|口令)[^\r\n]{0,160}[:：])\s*$/i.exec(normalized)
-    if (password) {
-        return { prompt: password[1].trim(), kind: 'password' }
-    }
-    const yesNo = /([^\r\n]*(?:\[[Yy](?:es)?\s*\/\s*[Nn](?:o)?\]|\[[Nn](?:o)?\s*\/\s*[Yy](?:es)?\]|\([Yy](?:es)?\s*\/\s*[Nn](?:o)?\)|\([Nn](?:o)?\s*\/\s*[Yy](?:es)?\)|continue\?|proceed\?|确认|是否)[^\r\n]*)\s*$/i.exec(normalized)
-    if (yesNo) {
-        return { prompt: yesNo[1].trim(), kind: 'yes-no' }
-    }
-    const text = /([^\r\n]{2,240}(?:enter|input|select|choose|provide|port|path|name|请输入|请选择|输入|端口|路径|名称)[^\r\n]*[:：])\s*$/i.exec(normalized)
-    if (text) {
-        return { prompt: text[1].trim(), kind: 'text' }
-    }
-    return null
 }
 
 export class CommandFramingMiddleware extends SessionMiddleware {
@@ -75,10 +54,7 @@ export class CommandFramingMiddleware extends SessionMiddleware {
         if (match) {
             const before = pending.buffer.substring(0, match.index)
             const after = pending.buffer.substring(match.index + match[0].length)
-            pending.output += before
-            if (before) {
-                this.outputToTerminal.next(Buffer.from(before, 'utf8'))
-            }
+            this.emitVisible(pending, before)
             if (after) {
                 this.outputToTerminal.next(Buffer.from(after, 'utf8'))
             }
@@ -92,8 +68,7 @@ export class CommandFramingMiddleware extends SessionMiddleware {
         if (pending.buffer.length > tailLength) {
             const safe = pending.buffer.substring(0, pending.buffer.length - tailLength)
             pending.buffer = pending.buffer.substring(pending.buffer.length - tailLength)
-            pending.output += safe
-            this.outputToTerminal.next(Buffer.from(safe, 'utf8'))
+            this.emitVisible(pending, safe)
         }
     }
 
@@ -110,6 +85,7 @@ export class CommandFramingMiddleware extends SessionMiddleware {
         input: AIInputMiddleware,
         onPrompt?: (prompt: string, kind: InteractivePromptKind) => Promise<string|null>,
         signal?: AbortSignal,
+        outputFilter?: (content: string) => string,
     ): Promise<CommandExecutionResult> {
         if (this.pending) {
             return Promise.reject(new Error('Another AI command is already running in this terminal'))
@@ -135,6 +111,7 @@ export class CommandFramingMiddleware extends SessionMiddleware {
                 promptActive: false,
                 started: false,
                 signal,
+                outputFilter,
             }
             pending.abortHandler = () => this.cancel(signal?.reason)
             signal?.addEventListener('abort', pending.abortHandler, { once: true })
@@ -152,6 +129,10 @@ export class CommandFramingMiddleware extends SessionMiddleware {
         const pending = this.pending
         this.pending = null
         this.removeAbortHandler(pending)
+        if (pending.started && pending.buffer) {
+            this.emitVisible(pending, this.stripPartialEndMarker(pending))
+            pending.buffer = ''
+        }
         pending.input.sendAgent(Buffer.from([3]))
         pending.reject(reason instanceof Error ? reason : new DOMException('Agent stopped', 'AbortError'))
     }
@@ -161,6 +142,9 @@ export class CommandFramingMiddleware extends SessionMiddleware {
             const pending = this.pending
             this.pending = null
             this.removeAbortHandler(pending)
+            if (pending.started && pending.buffer) {
+                this.emitVisible(pending, this.stripPartialEndMarker(pending))
+            }
             pending.reject(new Error('SSH session closed before the AI command completed'))
         }
         this.decoder.end()
@@ -177,6 +161,13 @@ export class CommandFramingMiddleware extends SessionMiddleware {
             return
         }
         pending.promptActive = true
+        // The marker safety tail normally delays short chunks. Show the
+        // actual prompt before opening the form so the terminal and form stay
+        // visually in sync.
+        if (pending.buffer) {
+            this.emitVisible(pending, pending.buffer)
+            pending.buffer = ''
+        }
         void pending.onPrompt(detected.prompt, detected.kind)
             .then(value => {
                 if (value !== null && this.pending === pending) {
@@ -197,5 +188,21 @@ export class CommandFramingMiddleware extends SessionMiddleware {
         if (pending.signal && pending.abortHandler) {
             pending.signal.removeEventListener('abort', pending.abortHandler)
         }
+    }
+
+    private emitVisible (pending: PendingCommand, content: string): void {
+        if (!content) {
+            return
+        }
+        const visible = pending.outputFilter?.(content) ?? content
+        pending.output += visible
+        if (visible) {
+            this.outputToTerminal.next(Buffer.from(visible, 'utf8'))
+        }
+    }
+
+    private stripPartialEndMarker (pending: PendingCommand): string {
+        const markerStart = pending.buffer.indexOf(pending.marker)
+        return markerStart === -1 ? pending.buffer : pending.buffer.substring(0, markerStart)
     }
 }

@@ -68,12 +68,13 @@ export class TerminalControllerService {
         command: string,
         onPrompt?: (prompt: string, kind: InteractivePromptKind) => Promise<string|null>,
         signal?: AbortSignal,
+        outputFilter?: (content: string) => string,
     ): Promise<CommandExecutionResult> {
         const input = this.middlewareByTab.get(runtime.tab)
         const framing = this.framingByTab.get(runtime.tab)
         if (!input || !framing) {
             throw new Error('AI terminal middleware is not attached')
         }
-        return framing.execute(command, input, onPrompt, signal)
+        return framing.execute(command, input, onPrompt, signal, outputFilter)
     }
 }

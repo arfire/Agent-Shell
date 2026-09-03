@@ -4,7 +4,7 @@ import * as crypto from 'crypto'
 import { AIConfigService } from '../config/ai-config.service'
 import { ChatCompletionsClient, ChatTool, ToolCall } from '../llm/chat-completions.client'
 import { CommandPolicyDecision, CommandPolicyService } from '../policy/command-policy.service'
-import { SecretRedactor } from '../policy/secret-redactor'
+import { SecretRedactor, SecretRedactionScope } from '../policy/secret-redactor'
 import { AISessionRuntime, AISessionService } from '../session/ai-session.service'
 import { AIInputMiddleware } from '../terminal/ai-input.middleware'
 import { TerminalControllerService } from '../terminal/terminal-controller.service'
@@ -22,10 +22,25 @@ const TERMINAL_TOOLS: ChatTool[] = [{
         parameters: {
             type: 'object',
             properties: {
-                command: { type: 'string', description: 'A Linux shell command. Combined shell syntax is allowed.' },
+                command: { type: 'string', description: 'A Linux shell command. Format long combined commands over multiple lines with readable indentation and shell-safe continuations.' },
                 reason: { type: 'string', description: 'A concise user-facing reason for running this command.' },
             },
             required: ['command', 'reason'],
+            additionalProperties: false,
+        },
+    },
+}, {
+    type: 'function',
+    'function': {
+        name: 'request_user_input',
+        description: 'Show a local interactive form when required information is missing. Secret values are never sent back to the model; the result contains an opaque placeholder for use in terminal_exec.',
+        parameters: {
+            type: 'object',
+            properties: {
+                prompt: { type: 'string', description: 'A concise question shown to the user.' },
+                kind: { type: 'string', 'enum': ['text', 'secret'], description: 'Use secret for credentials, tokens, private endpoints and other sensitive values.' },
+            },
+            required: ['prompt', 'kind'],
             additionalProperties: false,
         },
     },
@@ -36,6 +51,7 @@ interface ActiveRun {
     controller: AbortController
     stopRequested: boolean
     goal: string
+    sensitive: SecretRedactionScope
 }
 
 class UserRejectedError extends Error { }
@@ -75,7 +91,9 @@ export class AgentService {
             controller: new AbortController(),
             stopRequested: false,
             goal: input,
+            sensitive: this.redactor.createScope(),
         }
+        const protectedInput = run.sensitive.protect(input)
         runtime.activeRunId = run.id
         runtime.locked = true
         runtime.state.next('QUEUED')
@@ -83,14 +101,14 @@ export class AgentService {
 
         let release: (() => void)|null = null
         try {
-            await this.sessions.append(runtime, 'user-ai-input', { content: input }, run.id)
+            await this.sessions.append(runtime, 'user-ai-input', { content: protectedInput }, run.id)
             await this.sessions.append(runtime, 'agent-state', { state: 'QUEUED' }, run.id)
             await this.blocks.open(runtime, run.id, () => this.stop(runtime))
             await this.config.ready
             release = await this.queue.acquire(run.controller.signal)
             runtime.state.next('THINKING')
             await this.sessions.append(runtime, 'agent-state', { state: 'THINKING' }, run.id)
-            await this.runLoop(runtime, run, input)
+            await this.runLoop(runtime, run, protectedInput)
             if (run.stopRequested) {
                 throw new DOMException('Agent stopped', 'AbortError')
             }
@@ -111,9 +129,12 @@ export class AgentService {
             this.activeRuns.delete(runtime.id)
             runtime.activeRunId = undefined
             runtime.liveText.next('')
-            runtime.locked = false
+            // Reset the shadow readline state and enqueue the fresh prompt
+            // before accepting another xterm/IME commit. Otherwise a very
+            // quick next input can race the previous run's cleanup.
             inputMiddleware.resetInputBuffer()
             inputMiddleware.sendAgent('\r')
+            runtime.locked = false
             runtime.tab.frontend?.focus()
         }
     }
@@ -129,7 +150,12 @@ export class AgentService {
     }
 
     private async runLoop (runtime: AISessionRuntime, run: ActiveRun, input: string): Promise<void> {
-        const messages = this.context.build(runtime, input, this.config.config.agent.maxContextTokens)
+        const messages = this.context.build(
+            runtime,
+            input,
+            this.config.config.agent.maxContextTokens,
+            content => run.sensitive.protect(content),
+        )
         for (let step = 0; step < 50; step++) {
             if (run.stopRequested) {
                 throw new DOMException('Agent stopped', 'AbortError')
@@ -156,7 +182,7 @@ export class AgentService {
                 messages.push({
                     role: 'tool',
                     tool_call_id: toolCall.id,
-                    content: this.redactor.redact(toolResult),
+                    content: run.sensitive.redactKnown(toolResult),
                 })
             }
         }
@@ -164,6 +190,9 @@ export class AgentService {
     }
 
     private async executeTool (runtime: AISessionRuntime, run: ActiveRun, toolCall: ToolCall): Promise<string> {
+        if (toolCall.function.name === 'request_user_input') {
+            return this.requestUserInput(runtime, run, toolCall)
+        }
         if (toolCall.function.name !== 'terminal_exec') {
             return JSON.stringify({ error: `Unsupported tool: ${toolCall.function.name}` })
         }
@@ -176,8 +205,8 @@ export class AgentService {
         if (typeof argumentsValue.command !== 'string' || typeof argumentsValue.reason !== 'string') {
             return JSON.stringify({ error: 'terminal_exec requires string command and reason fields' })
         }
-        let command = argumentsValue.command.trim()
-        const reason = argumentsValue.reason.trim()
+        let command = run.sensitive.protect(argumentsValue.command.trim())
+        const reason = run.sensitive.protect(argumentsValue.reason.trim())
         let decision = this.policy.evaluate(command)
         await this.sessions.append(runtime, 'ai-command', { command, reason, risk: decision.risk }, run.id)
 
@@ -190,20 +219,21 @@ export class AgentService {
                 sessionId: runtime.id,
                 runId: run.id,
                 command,
-                reason,
+                reason: `${reason}\nPolicy: ${decision.reason}`,
                 risk: decision.risk,
                 confirmationsRequired: decision.risk === 'DANGEROUS' ? 2 : 1,
             })
+            const protectedEditedCommand = run.sensitive.protect(response.command.trim())
             await this.sessions.append(runtime, 'approval', {
                 approved: response.approved,
                 originalCommand: command,
-                finalCommand: response.command,
+                finalCommand: protectedEditedCommand,
             }, run.id)
             if (!response.approved) {
                 throw new UserRejectedError('User rejected the command')
             }
             const originalDecision = decision
-            command = response.command.trim()
+            command = protectedEditedCommand
             decision = this.policy.evaluate(command)
             if (isHigherRisk(decision, originalDecision)) {
                 return this.executeReclassifiedCommand(runtime, run, command, reason, decision)
@@ -231,21 +261,22 @@ export class AgentService {
             risk: decision.risk,
             confirmationsRequired: decision.risk === 'DANGEROUS' ? 2 : 1,
         })
+        const protectedEditedCommand = run.sensitive.protect(response.command.trim())
         await this.sessions.append(runtime, 'approval', {
             approved: response.approved,
             originalCommand: command,
-            finalCommand: response.command,
+            finalCommand: protectedEditedCommand,
             reclassified: true,
             risk: decision.risk,
         }, run.id)
         if (!response.approved) {
             throw new UserRejectedError('User rejected the reclassified command')
         }
-        const finalDecision = this.policy.evaluate(response.command)
+        const finalDecision = this.policy.evaluate(protectedEditedCommand)
         if (isHigherRisk(finalDecision, decision)) {
-            return this.executeReclassifiedCommand(runtime, run, response.command, reason, finalDecision)
+            return this.executeReclassifiedCommand(runtime, run, protectedEditedCommand, reason, finalDecision)
         }
-        return this.executeApprovedCommand(runtime, run, response.command, reason, finalDecision)
+        return this.executeApprovedCommand(runtime, run, protectedEditedCommand, reason, finalDecision)
     }
 
     private async executeApprovedCommand (
@@ -262,8 +293,10 @@ export class AgentService {
         await this.sessions.append(runtime, 'ssh-input', { content: command, source: 'ai', reason }, run.id)
         await this.blocks.interrupt(run.id)
         try {
-            const result = await this.terminal.execute(runtime, command, (prompt, kind) =>
-                this.handleInteractivePrompt(runtime, run, prompt, kind), run.controller.signal)
+            const executableCommand = run.sensitive.restore(command)
+            const result = await this.terminal.execute(runtime, executableCommand, (prompt, kind) =>
+                this.handleInteractivePrompt(runtime, run, prompt, kind), run.controller.signal,
+            content => run.sensitive.redactKnown(content))
             runtime.state.next('OBSERVING')
             if (run.stopRequested) {
                 throw new DOMException('Agent stopped after command completion', 'AbortError')
@@ -274,6 +307,45 @@ export class AgentService {
                 await this.blocks.open(runtime, run.id, () => this.stop(runtime), this.nextEventSeq(runtime))
             }
         }
+    }
+
+    private async requestUserInput (runtime: AISessionRuntime, run: ActiveRun, toolCall: ToolCall): Promise<string> {
+        let argumentsValue: { prompt?: unknown, kind?: unknown } = {}
+        try {
+            argumentsValue = JSON.parse(toolCall.function.arguments)
+        } catch (error) {
+            return JSON.stringify({ error: `Invalid tool arguments: ${String(error)}` })
+        }
+        if (typeof argumentsValue.prompt !== 'string' || !['text', 'secret'].includes(String(argumentsValue.kind))) {
+            return JSON.stringify({ error: 'request_user_input requires a prompt and kind of text or secret' })
+        }
+        runtime.state.next('WAITING_INTERACTION')
+        const form = await this.interactions.requestForm({
+            sessionId: runtime.id,
+            runId: run.id,
+            prompt: argumentsValue.prompt,
+            kind: argumentsValue.kind === 'secret' ? 'password' : 'text',
+        })
+        runtime.state.next('THINKING')
+        if (!form.submitted) {
+            throw new UserRejectedError('User cancelled the requested input')
+        }
+        if (argumentsValue.kind === 'secret') {
+            const placeholder = run.sensitive.register(form.value)
+            await this.sessions.append(runtime, 'interaction', {
+                prompt: argumentsValue.prompt,
+                kind: 'secret',
+                response: '[SENSITIVE_VALUE_PROVIDED_LOCALLY]',
+            }, run.id)
+            return JSON.stringify({ value: placeholder, sensitive: true })
+        }
+        const value = run.sensitive.protect(form.value)
+        await this.sessions.append(runtime, 'interaction', {
+            prompt: argumentsValue.prompt,
+            kind: 'text',
+            response: value,
+        }, run.id)
+        return JSON.stringify({ value, sensitive: value !== form.value })
     }
 
     private async handleInteractivePrompt (
@@ -292,7 +364,7 @@ export class AgentService {
                 },
                 {
                     role: 'user',
-                    content: this.redactor.redact(`Goal: ${run.goal}\nPrompt: ${prompt}`),
+                    content: run.sensitive.protect(`Goal: ${run.goal}\nPrompt: ${prompt}`),
                 },
             ], [], {}, run.controller.signal)
             const answer = response.content.trim().toLowerCase()
@@ -313,6 +385,9 @@ export class AgentService {
                 })
                 if (form.submitted) {
                     value = form.value
+                    if (kind === 'password') {
+                        run.sensitive.register(value)
+                    }
                 }
             } finally {
                 await this.blocks.interrupt(run.id)
@@ -320,7 +395,7 @@ export class AgentService {
         }
         if (value !== null) {
             await this.sessions.append(runtime, 'interaction', {
-                prompt,
+                prompt: run.sensitive.protect(prompt),
                 kind,
                 response: kind === 'password' ? '[PASSWORD_PROVIDED]' : value,
             }, run.id)

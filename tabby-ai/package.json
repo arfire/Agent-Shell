@@ -1,6 +1,6 @@
 {
   "name": "tabby-ai",
-  "version": "1.0.231-nightly.0",
+  "version": "1.0.235",
   "description": "AI agent for Tabby SSH sessions",
   "keywords": ["tabby-builtin-plugin"],
   "main": "dist/index.js",

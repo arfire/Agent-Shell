@@ -7,7 +7,7 @@ import { execSync } from 'child_process'
 vars.allPackages.forEach(plugin => {
     log.info('bump', plugin)
     sh.cd(plugin)
-    sh.exec('npm --no-git-tag-version version ' + vars.version, { fatal: true })
+    sh.exec('npm --no-git-tag-version version ' + vars.tabbyVersion, { fatal: true })
     execSync('npm publish --tag latest', { stdio: 'inherit' })
     sh.cd('..')
 })

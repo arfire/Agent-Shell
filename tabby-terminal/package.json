@@ -1,6 +1,6 @@
 {
   "name": "tabby-terminal",
-  "version": "1.0.231-nightly.0",
+  "version": "1.0.235",
   "description": "Tabby's terminal emulation core",
   "keywords": [
     "tabby-builtin-plugin"
@@ -8,7 +8,7 @@
   "main": "dist/index.js",
   "typings": "typings/index.d.ts",
   "scripts": {
-    "build": "webpack --progress --color --display-modules",
+    "build": "webpack --progress --color",
     "watch": "webpack --progress --color --watch",
     "prepare": "patch-package"
   },

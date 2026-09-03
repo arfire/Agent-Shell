@@ -4,6 +4,7 @@ import { SSHTabComponent } from 'tabby-ssh'
 
 import { AISessionStore } from './session-store'
 import { SessionEvent } from './session-event'
+import { SecretRedactor } from '../policy/secret-redactor'
 
 export interface AISessionRuntime {
     id: string
@@ -20,7 +21,10 @@ export class AISessionService {
     private readonly sessions = new Map<SSHTabComponent, AISessionRuntime>()
     private readonly pendingAttachments = new Map<SSHTabComponent, Promise<AISessionRuntime>>()
 
-    constructor (private store: AISessionStore) { }
+    constructor (
+        private store: AISessionStore,
+        private redactor: SecretRedactor,
+    ) { }
 
     async attach (tab: SSHTabComponent): Promise<AISessionRuntime> {
         const existing = this.sessions.get(tab)
@@ -75,8 +79,22 @@ export class AISessionService {
     }
 
     async append<T> (runtime: AISessionRuntime, type: SessionEvent['type'], data: T, runId?: string): Promise<SessionEvent<T>> {
-        const event = await this.store.append(runtime.id, type, data, runId)
+        const protectedData = this.protectStoredValue(data) as T
+        const event = await this.store.append(runtime.id, type, protectedData, runId)
         runtime.events.next([...runtime.events.value, event])
         return event
+    }
+
+    private protectStoredValue (value: unknown): unknown {
+        if (typeof value === 'string') {
+            return this.redactor.redact(value)
+        }
+        if (Array.isArray(value)) {
+            return value.map(item => this.protectStoredValue(item))
+        }
+        if (value && typeof value === 'object') {
+            return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, this.protectStoredValue(item)]))
+        }
+        return value
     }
 }

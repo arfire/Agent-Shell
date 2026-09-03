@@ -8,6 +8,7 @@ import { AIInputMiddleware } from './ai-input.middleware'
 import { AISessionCaptureMiddleware } from './session-capture.middleware'
 import { TerminalControllerService } from './terminal-controller.service'
 import { InlineBlockService } from '../ui/inline-block.service'
+import { SecretRedactor } from '../policy/secret-redactor'
 
 @Injectable()
 export class AITerminalDecorator extends TerminalDecorator {
@@ -18,6 +19,7 @@ export class AITerminalDecorator extends TerminalDecorator {
         private controller: TerminalControllerService,
         private blocks: InlineBlockService,
         private agent: AgentService,
+        private redactor: SecretRedactor,
     ) {
         super()
     }
@@ -48,10 +50,10 @@ export class AITerminalDecorator extends TerminalDecorator {
         const runtime = await this.sessions.attach(tab)
         await this.attachMiddleware(tab)
         await this.controller.attach(tab, runtime, this.getRequestHandler(runtime))
-        const historicalRuns = [...new Set(runtime.events.value.map(event => event.runId).filter((id): id is string => !!id))]
-        for (const runId of historicalRuns) {
-            await this.blocks.open(runtime, runId)
-        }
+        // JSONL history remains available to the context builder. Recreating
+        // every historical Angular decoration at the current cursor would
+        // duplicate old blocks and make each xterm repaint progressively
+        // slower after reconnecting.
     }
 
     private async attachMiddleware (tab: SSHTabComponent): Promise<void> {
@@ -60,7 +62,7 @@ export class AITerminalDecorator extends TerminalDecorator {
         }
         const runtime = await this.sessions.attach(tab)
         if (!this.attachedMiddlewareStacks.has(tab.session.middleware)) {
-            tab.session.middleware.unshift(new AISessionCaptureMiddleware(runtime, this.sessions))
+            tab.session.middleware.unshift(new AISessionCaptureMiddleware(runtime, this.sessions, this.redactor))
             this.attachedMiddlewareStacks.add(tab.session.middleware)
         }
         await this.controller.attachMiddleware(tab, runtime, this.getRequestHandler(runtime))

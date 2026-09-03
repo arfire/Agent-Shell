@@ -13,8 +13,12 @@
         )
             i.fas([class.fa-chevron-down]='collapsed', [class.fa-chevron-up]='!collapsed')
 
-    .ai-body(#body='', (wheel)='onWheel($event)')
+    .ai-body(#body='', (wheel)='onWheel($event)', (scroll)='onBodyScroll()')
         .ai-body-content(#content='')
+            .user-input(*ngFor='let event of getUserInputs()')
+                .message-label YOU
+                .user-input-content {{ getUserInput(event) }}
+
             ng-container(*ngFor='let event of getMessages()')
                 .ai-message.markdown-content(*ngIf='event.type === "ai-message"', [innerHTML]='getMessageHTML(event)')
                 .ai-error(*ngIf='event.type === "error"') {{ event.data.message }}
@@ -31,10 +35,9 @@
                 .command-meta
                     span.badge([class.badge-danger]='request.risk === "DANGEROUS"', [class.badge-warning]='request.risk === "MODIFY"') {{ request.risk }}
                     span {{ getRequestReason(request) }}
-                .approval-command-preview $ {{ getCommand(request) || '(empty command)' }}
                 textarea.form-control.command-input(
                     #commandInput='',
-                    rows='2',
+                    [rows]='getCommandRows(request)',
                     [value]='getCommand(request)',
                     (input)='updateCommandFromEvent(request, $event)',
                     (keydown)='stopTerminalEvent($event)',
@@ -57,7 +60,9 @@
                     ) Execute
 
             .command-card(*ngFor='let form of forms')
-                .command-meta {{ form.prompt }}
+                .command-meta
+                    span.badge {{ form.kind === 'password' ? 'SENSITIVE' : 'INPUT' }}
+                    span {{ form.prompt }}
                 input.form-control(
                     #formInput='',
                     [type]='form.kind === "password" ? "password" : "text"',

@@ -129,9 +129,21 @@ redaction:
     - name: authorization
       pattern: '(?i)(authorization\s*:\s*)([^\r\n]+)'
       replacement: '$1[REDACTED]'
-    - name: secret-assignment
-      pattern: '(?i)((password|passwd|token|secret|api[_-]?key|cookie)\s*[=:]\s*)([^\s]+)'
+    - name: password-argument
+      pattern: '(?i)((?:--password|--passwd)(?:=|\s+))([^\s]+)'
       replacement: '$1[REDACTED]'
+    - name: secret-assignment
+      pattern: '(?i)(["'']?(password|passwd|token|secret|api[_-]?key|cookie|access[_-]?key|private[_-]?key)["'']?\s*[=:]\s*)("[^"\r\n]*"|''[^''\r\n]*''|[^\s,}\r\n]+)'
+      replacement: '$1[REDACTED]'
+    - name: credential-url
+      pattern: '(?i)\b(https?|ssh|mysql|postgres(?:ql)?):\/\/[^\s:@/]+:[^\s@/]+@'
+      replacement: '$1://[REDACTED_CREDENTIALS]@'
+    - name: aws-access-key
+      pattern: '\b(?:AKIA|ASIA)[A-Z0-9]{16}\b'
+      replacement: '[REDACTED_AWS_ACCESS_KEY]'
     - name: openai-key
       pattern: '\bsk-[A-Za-z0-9_-]{16,}\b'
       replacement: '[REDACTED_API_KEY]'
+    - name: aliyun-personal-registry
+      pattern: '(?i)\bcrpi-[a-z0-9]+(?:\.[a-z0-9-]+)*\.personal\.cr\.aliyuncs\.com(?:\/[A-Za-z0-9._-]+)+'
+      replacement: '[REDACTED_PRIVATE_REGISTRY]'

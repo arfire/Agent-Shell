@@ -27,7 +27,7 @@ export class AIInlineBlockComponent implements OnInit, AfterViewInit, OnDestroy 
     @Input() runtime: AISessionRuntime
     @Input() runId: string
     @Input() stopHandler?: () => void
-    @Input() preferredHeightHandler?: (height: number) => void
+    @Input() preferredHeightHandler?: (height: number, userInitiated?: boolean) => void
     @Input() firstEventSeq = 0
 
     events: SessionEvent[] = []
@@ -50,8 +50,11 @@ export class AIInlineBlockComponent implements OnInit, AfterViewInit, OnDestroy 
     private interrupted = false
     private layoutObserver?: ResizeObserver
     private layoutFrame?: number
-    private renderFrame?: number
+    private renderTimer?: ReturnType<typeof setTimeout>
+    private bodyScrollFrame?: number
     private destroyed = false
+    private bodyPinnedToBottom = true
+    private lastPreferredHeight = -1
     private messageHTML = new Map<string, string>()
     private liveMarkdown = { source: '', html: '' }
 
@@ -122,8 +125,12 @@ export class AIInlineBlockComponent implements OnInit, AfterViewInit, OnDestroy 
     ngAfterViewInit (): void {
         this.subscriptions.push(this.commandInputs.changes.subscribe(() => this.focusCommandInput()))
         this.subscriptions.push(this.formInputs.changes.subscribe(() => this.focusFormInput()))
-        this.layoutObserver = new ResizeObserver(() => this.refreshLayout())
+        this.layoutObserver = new ResizeObserver(() => {
+            this.refreshLayout()
+            this.scrollBodyToBottom()
+        })
         this.layoutObserver.observe(this.headerElement!.nativeElement)
+        this.layoutObserver.observe(this.bodyElement!.nativeElement)
         this.layoutObserver.observe(this.contentElement!.nativeElement)
         this.focusCommandInput()
         this.focusFormInput()
@@ -137,8 +144,11 @@ export class AIInlineBlockComponent implements OnInit, AfterViewInit, OnDestroy 
         if (this.layoutFrame !== undefined) {
             cancelAnimationFrame(this.layoutFrame)
         }
-        if (this.renderFrame !== undefined) {
-            cancelAnimationFrame(this.renderFrame)
+        if (this.renderTimer !== undefined) {
+            clearTimeout(this.renderTimer)
+        }
+        if (this.bodyScrollFrame !== undefined) {
+            cancelAnimationFrame(this.bodyScrollFrame)
         }
     }
 
@@ -146,8 +156,28 @@ export class AIInlineBlockComponent implements OnInit, AfterViewInit, OnDestroy 
         return this.events.filter(event => ['ai-message', 'error'].includes(event.type))
     }
 
+    getUserInputs (): SessionEvent[] {
+        return this.events.filter(event => event.type === 'user-ai-input')
+    }
+
+    getUserInput (event: SessionEvent): string {
+        return String((event.data as any)?.content ?? '')
+    }
+
     getCommands (): SessionEvent[] {
-        return this.events.filter(event => event.type === 'ai-command')
+        const pending = new Set(this.requests.map(request => this.normalizeCommandForDisplay(request.command)))
+        const seen = new Set<string>()
+        return this.events.filter(event => {
+            if (event.type !== 'ai-command') {
+                return false
+            }
+            const command = this.normalizeCommandForDisplay(this.getCommandContent(event))
+            if (!command || pending.has(command) || seen.has(command)) {
+                return false
+            }
+            seen.add(command)
+            return true
+        })
     }
 
     getMessageHTML (event: SessionEvent): string {
@@ -173,6 +203,10 @@ export class AIInlineBlockComponent implements OnInit, AfterViewInit, OnDestroy 
 
     getCommand (request: ApprovalRequest): string {
         return this.editedCommands.get(request.id) ?? request.command
+    }
+
+    getCommandRows (request: ApprovalRequest): number {
+        return Math.max(2, Math.min(8, this.getCommand(request).split(/\r?\n/).length))
     }
 
     getCommandRisk (event: SessionEvent): string {
@@ -242,7 +276,8 @@ export class AIInlineBlockComponent implements OnInit, AfterViewInit, OnDestroy 
         event.preventDefault()
         event.stopPropagation()
         this.collapsed = !this.collapsed
-        this.refreshLayout()
+        this.changeDetector.detectChanges()
+        this.refreshLayout(true, true)
     }
 
     interrupt (): void {
@@ -257,6 +292,7 @@ export class AIInlineBlockComponent implements OnInit, AfterViewInit, OnDestroy 
         this.forms = []
         this.stopHandler = undefined
         this.state = 'INTERRUPTED'
+        this.freeze()
     }
 
     finish (): void {
@@ -272,6 +308,7 @@ export class AIInlineBlockComponent implements OnInit, AfterViewInit, OnDestroy 
         this.stopHandler = undefined
         const lastState = [...this.events].reverse().find(event => event.type === 'agent-state')
         this.state = (lastState?.data as any)?.state ?? this.state
+        this.freeze()
     }
 
     onWheel (event: WheelEvent): void {
@@ -292,13 +329,24 @@ export class AIInlineBlockComponent implements OnInit, AfterViewInit, OnDestroy 
         if (!canScrollVertically && !canScrollHorizontally) {
             return
         }
+        if (deltaY < 0) {
+            this.bodyPinnedToBottom = false
+        }
         element.scrollTop += deltaY
         element.scrollLeft += deltaX
+        this.bodyPinnedToBottom = this.isBodyAtBottom(element)
         event.preventDefault()
         event.stopPropagation()
     }
 
-    refreshLayout (immediate = false): void {
+    onBodyScroll (): void {
+        const body = this.bodyElement?.nativeElement
+        if (body) {
+            this.bodyPinnedToBottom = this.isBodyAtBottom(body)
+        }
+    }
+
+    refreshLayout (immediate = false, userInitiated = false): void {
         const handler = this.preferredHeightHandler
         const header = this.headerElement?.nativeElement
         const body = this.bodyElement?.nativeElement
@@ -317,7 +365,11 @@ export class AIInlineBlockComponent implements OnInit, AfterViewInit, OnDestroy 
             const bodySpacing = parsePixels(bodyStyle.paddingTop) + parsePixels(bodyStyle.paddingBottom)
             const borders = 2
             const bodyHeight = this.collapsed ? 0 : content.scrollHeight + bodySpacing
-            handler(header.offsetHeight + bodyHeight + hostSpacing + borders)
+            const preferredHeight = header.offsetHeight + bodyHeight + hostSpacing + borders
+            if (Math.abs(preferredHeight - this.lastPreferredHeight) >= 1) {
+                this.lastPreferredHeight = preferredHeight
+                handler(preferredHeight, userInitiated)
+            }
         }
         if (immediate) {
             update()
@@ -389,16 +441,51 @@ export class AIInlineBlockComponent implements OnInit, AfterViewInit, OnDestroy 
     }
 
     private queueRender (): void {
-        if (this.destroyed || this.renderFrame !== undefined) {
+        if (this.destroyed || this.renderTimer !== undefined) {
             return
         }
-        this.renderFrame = requestAnimationFrame(() => {
-            this.renderFrame = undefined
+        // Streaming providers can deliver dozens of token deltas per second.
+        // Parsing the entire Markdown document and measuring its height for
+        // every delta starves xterm input/paint on long answers.
+        this.renderTimer = setTimeout(() => {
+            this.renderTimer = undefined
             if (this.destroyed) {
                 return
             }
             this.changeDetector.detectChanges()
             this.refreshLayout()
+            this.scrollBodyToBottom()
+        }, 50)
+    }
+
+    private scrollBodyToBottom (): void {
+        if (!this.bodyPinnedToBottom) {
+            return
+        }
+        if (this.bodyScrollFrame !== undefined) {
+            return
+        }
+        this.bodyScrollFrame = requestAnimationFrame(() => {
+            this.bodyScrollFrame = undefined
+            const body = this.bodyElement?.nativeElement
+            if (body && this.bodyPinnedToBottom) {
+                body.scrollTop = body.scrollHeight
+            }
         })
+    }
+
+    private isBodyAtBottom (body: HTMLElement): boolean {
+        return body.scrollTop + body.clientHeight >= body.scrollHeight - 2
+    }
+
+    private normalizeCommandForDisplay (command: string): string {
+        return command.replace(/\s+/g, ' ').trim()
+    }
+
+    private freeze (): void {
+        this.subscriptions.forEach(subscription => subscription.unsubscribe())
+        this.subscriptions = []
+        this.layoutObserver?.disconnect()
+        this.layoutObserver = undefined
     }
 }

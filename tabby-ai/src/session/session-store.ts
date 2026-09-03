@@ -14,6 +14,7 @@ export class AISessionStore {
     private readonly metadata = new Map<string, SessionMetadata>()
     private readonly writes = new Map<string, Promise<void>>()
     private indexWrite = Promise.resolve()
+    private indexSaveTimer?: ReturnType<typeof setTimeout>
     private readonly logger: Logger
     private ready: Promise<void>
 
@@ -74,7 +75,7 @@ export class AISessionStore {
         const previous = this.writes.get(sessionId) ?? Promise.resolve()
         const write = previous.then(async () => {
             await fs.promises.appendFile(this.getSessionPath(sessionId), JSON.stringify(event) + '\n', 'utf8')
-            await this.saveIndex()
+            this.scheduleIndexSave()
         }).catch(error => {
             this.logger.error(`Could not append event to ${sessionId}:`, error)
             throw error
@@ -165,5 +166,15 @@ export class AISessionStore {
             await fs.promises.rename(temporaryPath, this.indexPath)
         })
         await this.indexWrite
+    }
+
+    private scheduleIndexSave (): void {
+        if (this.indexSaveTimer) {
+            return
+        }
+        this.indexSaveTimer = setTimeout(() => {
+            this.indexSaveTimer = undefined
+            void this.saveIndex().catch(error => this.logger.error('Could not update the AI session index:', error))
+        }, 500)
     }
 }

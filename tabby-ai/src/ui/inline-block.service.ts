@@ -38,13 +38,13 @@ export class InlineBlockService {
         component.instance.firstEventSeq = firstEventSeq
         this.appRef.attachView(component.hostView)
         component.changeDetectorRef.detectChanges()
-        const decoration = await runtime.tab.frontend.registerInlineBlock(host, 3, 24)
+        const decoration = await runtime.tab.frontend.registerInlineBlock(host, 6, 32)
         if (!decoration) {
             this.appRef.detachView(component.hostView)
             component.destroy()
             return
         }
-        component.instance.preferredHeightHandler = height => decoration.resizeToContent(height)
+        component.instance.preferredHeightHandler = (height, userInitiated) => decoration.resizeToContent(height, userInitiated)
         component.instance.refreshLayout()
         component.onDestroy(() => decoration.dispose())
         const block = { sessionId: runtime.id, runId, component, decoration }

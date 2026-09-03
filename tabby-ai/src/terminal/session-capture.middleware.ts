@@ -1,24 +1,28 @@
 import { SessionMiddleware } from 'tabby-terminal'
+import { StringDecoder } from 'string_decoder'
 
 import { AISessionRuntime, AISessionService } from '../session/ai-session.service'
+import { SecretRedactor } from '../policy/secret-redactor'
 
 export class AISessionCaptureMiddleware extends SessionMiddleware {
     private outputBuffer = ''
     private flushTimer?: ReturnType<typeof setTimeout>
+    private decoder = new StringDecoder('utf8')
 
     constructor (
         private runtime: AISessionRuntime,
         private sessions: AISessionService,
+        private redactor: SecretRedactor,
     ) {
         super()
     }
 
     feedFromSession (data: Buffer): void {
-        this.outputBuffer += data.toString('utf8')
-        if (this.outputBuffer.length >= 65536) {
+        this.outputBuffer += this.decoder.write(data)
+        if (this.outputBuffer.length >= 262144) {
             this.flush()
         } else if (!this.flushTimer) {
-            this.flushTimer = setTimeout(() => this.flush(), 100)
+            this.flushTimer = setTimeout(() => this.flush(), 400)
         }
         this.outputToTerminal.next(data)
     }
@@ -31,6 +35,7 @@ export class AISessionCaptureMiddleware extends SessionMiddleware {
         if (this.flushTimer) {
             clearTimeout(this.flushTimer)
         }
+        this.outputBuffer += this.decoder.end()
         this.flush()
         super.close()
     }
@@ -43,7 +48,7 @@ export class AISessionCaptureMiddleware extends SessionMiddleware {
         if (!this.outputBuffer) {
             return
         }
-        const content = this.outputBuffer
+        const content = this.redactor.redact(this.outputBuffer)
         this.outputBuffer = ''
         void this.sessions.append(this.runtime, 'ssh-output', { content })
     }
