@@ -3,7 +3,7 @@ import { BehaviorSubject, filter, firstValueFrom, fromEvent, takeUntil } from 'r
 import { Injector } from '@angular/core'
 import { ConfigService, getCSSFontFamily, getWindows10Build, HostAppService, HotkeysService, Platform, PlatformService, TerminalColorScheme, ThemesService } from 'tabby-core'
 import { Frontend, SearchOptions, SearchState } from './frontend'
-import { Terminal, ITheme } from '@xterm/xterm'
+import { Terminal, IDecoration, IMarker, ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { LigaturesAddon } from '@xterm/addon-ligatures'
 import { ISearchOptions, SearchAddon } from '@xterm/addon-search'
@@ -25,6 +25,103 @@ const COLOR_NAMES = [
 // How many times to recreate the WebGL renderer after a lost GPU context
 // before giving up and letting xterm fall back to its DOM renderer.
 const MAX_WEBGL_RECOVERY_ATTEMPTS = 3
+
+export interface InlineBlockDecoration {
+    dispose: () => void
+    lock: () => Promise<void>
+    resizeToContent: (height: number) => void
+}
+
+class XTermInlineBlockDecoration implements InlineBlockDecoration {
+    private desiredRows: number
+    private disposed = false
+    private operation = Promise.resolve()
+
+    constructor (
+        private xterm: Terminal,
+        private xtermCore: any,
+        private marker: IMarker,
+        private decoration: IDecoration,
+        private reservedRows: number,
+        private minimumRows: number,
+        private maximumRows: number,
+    ) {
+        this.desiredRows = reservedRows
+    }
+
+    resizeToContent (height: number): void {
+        if (this.disposed) {
+            return
+        }
+        const cellHeight = this.getCellHeight()
+        this.desiredRows = Math.max(this.minimumRows, Math.min(this.maximumRows, Math.ceil(height / cellHeight)))
+        this.operation = this.operation.then(() => this.applyDesiredRows())
+    }
+
+    async lock (): Promise<void> {
+        await this.operation
+    }
+
+    render (element: HTMLElement): void {
+        element.style.height = `${this.reservedRows * this.getCellHeight()}px`
+    }
+
+    dispose (): void {
+        this.disposed = true
+        this.decoration.dispose()
+        this.marker.dispose()
+    }
+
+    private applyDesiredRows (): Promise<void> {
+        if (this.disposed || this.desiredRows === this.reservedRows) {
+            return Promise.resolve()
+        }
+        const nextRows = this.desiredRows
+        const sequence = this.buildResizeSequence(nextRows)
+        if (!sequence) {
+            return Promise.resolve()
+        }
+        return new Promise(resolve => {
+            this.xterm.write(sequence, () => {
+                this.reservedRows = nextRows
+                const mutableDecoration = this.decoration as any
+                mutableDecoration.options.height = nextRows
+                if (this.decoration.element) {
+                    this.render(this.decoration.element)
+                }
+                resolve()
+            })
+        })
+    }
+
+    /**
+     * Insert or delete the reserved rows in-place. Saving and restoring the
+     * cursor keeps all terminal text below the block attached to the same
+     * prompt while xterm's line operations update every affected marker.
+     */
+    private buildResizeSequence (nextRows: number): string|null {
+        const buffer = this.xterm.buffer.active
+        const cursorLine = buffer.baseY + buffer.cursorY
+        const delta = nextRows - this.reservedRows
+        const targetLine = this.marker.line + (delta > 0 ? this.reservedRows : nextRows)
+
+        // VT line insertion/deletion can only address the active screen, not
+        // rows that have already moved into scrollback.
+        if (targetLine < buffer.baseY || targetLine > cursorLine) {
+            return null
+        }
+
+        const moveToTarget = cursorLine === targetLine ? '' : `\x1b[${cursorLine - targetLine}A`
+        if (delta > 0) {
+            return `\x1b7${moveToTarget}\x1b[${delta}L\x1b8\x1b[${delta}B`
+        }
+        return `\x1b7${moveToTarget}\x1b[${-delta}M\x1b8\x1b[${-delta}A`
+    }
+
+    private getCellHeight (): number {
+        return Math.max(1, this.xtermCore._renderService?.dimensions?.css?.cell?.height ?? 1)
+    }
+}
 
 class FlowControl {
     private blocked = false
@@ -100,21 +197,22 @@ export class XTermFrontend extends Frontend {
      * Reserves terminal rows and anchors a DOM block to them. The rows are
      * local-only xterm content and are never sent to the remote session.
      */
-    registerInlineBlock (host: HTMLElement, height = 10): Promise<{ dispose: () => void }|null> {
+    registerInlineBlock (
+        host: HTMLElement,
+        initialHeight = 4,
+        maximumHeight = 24,
+    ): Promise<InlineBlockDecoration|null> {
         if (this.isAlternateScreenActive()) {
             return Promise.resolve(null)
         }
-        const reservedRows = Math.max(1, Math.floor(height))
+        const reservedRows = Math.max(1, Math.floor(initialHeight))
+        const maximumRows = Math.max(reservedRows, Math.floor(maximumHeight))
         return new Promise(resolve => {
             // The cursor is still on the line that triggered AI. Keep that
             // line visible, reserve the following rows for the block and leave
             // the cursor one row below it for subsequent SSH output.
             this.xterm.write('\r\n'.repeat(reservedRows + 1), () => {
                 const marker = this.xterm.registerMarker(-reservedRows)
-                if (!marker) {
-                    resolve(null)
-                    return
-                }
                 const decoration = this.xterm.registerDecoration({
                     marker,
                     x: 0,
@@ -127,6 +225,15 @@ export class XTermFrontend extends Frontend {
                     resolve(null)
                     return
                 }
+                const control = new XTermInlineBlockDecoration(
+                    this.xterm,
+                    this.xtermCore,
+                    marker,
+                    decoration,
+                    reservedRows,
+                    reservedRows,
+                    maximumRows,
+                )
                 decoration.onRender(element => {
                     element.classList.add('tabby-ai-decoration')
                     element.style.zIndex = '5'
@@ -134,13 +241,9 @@ export class XTermFrontend extends Frontend {
                     // even if its DOM content becomes taller than its reservation.
                     element.style.overflow = 'hidden'
                     element.replaceChildren(host)
+                    control.render(element)
                 })
-                resolve({
-                    dispose: () => {
-                        decoration.dispose()
-                        marker.dispose()
-                    },
-                })
+                resolve(control)
             })
         })
     }

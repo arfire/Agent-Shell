@@ -16,7 +16,7 @@ import { AgentRunQueue } from './run-queue'
 
 const TERMINAL_TOOLS: ChatTool[] = [{
     type: 'function',
-    function: {
+    'function': {
         name: 'terminal_exec',
         description: 'Execute one Linux shell command step in the current SSH session and return its output and exit code.',
         parameters: {
@@ -40,6 +40,15 @@ interface ActiveRun {
 
 class UserRejectedError extends Error { }
 
+function isHigherRisk (next: CommandPolicyDecision, previous: CommandPolicyDecision): boolean {
+    const weight = { SAFE: 0, MODIFY: 1, DANGEROUS: 2, DENY: 3 }
+    return weight[next.risk] > weight[previous.risk]
+}
+
+function getErrorMessage (error: unknown): string {
+    return error instanceof Error ? error.message : String(error)
+}
+
 @Injectable({ providedIn: 'root' })
 export class AgentService {
     private activeRuns = new Map<string, ActiveRun>()
@@ -57,7 +66,7 @@ export class AgentService {
         private blocks: InlineBlockService,
     ) { }
 
-    async start (runtime: AISessionRuntime, input: string, _inputMiddleware: AIInputMiddleware): Promise<void> {
+    async start (runtime: AISessionRuntime, input: string, inputMiddleware: AIInputMiddleware): Promise<void> {
         if (runtime.activeRunId) {
             return
         }
@@ -88,19 +97,24 @@ export class AgentService {
             runtime.state.next('DONE')
             await this.sessions.append(runtime, 'agent-state', { state: 'DONE' }, run.id)
         } catch (error) {
-            const cancelled = run.stopRequested || error instanceof UserRejectedError || (error as any)?.name === 'AbortError'
+            await this.preserveLiveText(runtime, run)
+            const cancelled = run.stopRequested || error instanceof UserRejectedError || error instanceof DOMException && error.name === 'AbortError'
             const state = cancelled ? 'CANCELLED' : 'FAILED'
             runtime.state.next(state)
             await this.sessions.append(runtime, cancelled ? 'agent-state' : 'error', cancelled
-                ? { state, reason: String((error as Error)?.message ?? error) }
-                : { message: String((error as Error)?.message ?? error) }, run.id)
+                ? { state, reason: getErrorMessage(error) }
+                : { message: getErrorMessage(error) }, run.id)
         } finally {
+            await this.blocks.finish(run.id)
             release?.()
             this.interactions.cancelRun(run.id)
             this.activeRuns.delete(runtime.id)
             runtime.activeRunId = undefined
             runtime.liveText.next('')
             runtime.locked = false
+            inputMiddleware.resetInputBuffer()
+            inputMiddleware.sendAgent('\r')
+            runtime.tab.frontend?.focus()
         }
     }
 
@@ -111,9 +125,7 @@ export class AgentService {
         }
         run.stopRequested = true
         this.interactions.cancelRun(run.id)
-        if (runtime.state.value !== 'EXECUTING' && runtime.state.value !== 'OBSERVING') {
-            run.controller.abort(new DOMException('Agent stopped', 'AbortError'))
-        }
+        run.controller.abort(new DOMException('Agent stopped', 'AbortError'))
     }
 
     private async runLoop (runtime: AISessionRuntime, run: ActiveRun, input: string): Promise<void> {
@@ -155,7 +167,7 @@ export class AgentService {
         if (toolCall.function.name !== 'terminal_exec') {
             return JSON.stringify({ error: `Unsupported tool: ${toolCall.function.name}` })
         }
-        let argumentsValue: { command?: unknown, reason?: unknown }
+        let argumentsValue: { command?: unknown, reason?: unknown } = {}
         try {
             argumentsValue = JSON.parse(toolCall.function.arguments)
         } catch (error) {
@@ -194,11 +206,11 @@ export class AgentService {
             command = response.command.trim()
             decision = this.policy.evaluate(command)
             if (isHigherRisk(decision, originalDecision)) {
-                return await this.executeReclassifiedCommand(runtime, run, command, reason, decision)
+                return this.executeReclassifiedCommand(runtime, run, command, reason, decision)
             }
         }
 
-        return await this.executeApprovedCommand(runtime, run, command, reason, decision)
+        return this.executeApprovedCommand(runtime, run, command, reason, decision)
     }
 
     private async executeReclassifiedCommand (
@@ -231,7 +243,7 @@ export class AgentService {
         }
         const finalDecision = this.policy.evaluate(response.command)
         if (isHigherRisk(finalDecision, decision)) {
-            return await this.executeReclassifiedCommand(runtime, run, response.command, reason, finalDecision)
+            return this.executeReclassifiedCommand(runtime, run, response.command, reason, finalDecision)
         }
         return this.executeApprovedCommand(runtime, run, response.command, reason, finalDecision)
     }
@@ -248,13 +260,20 @@ export class AgentService {
         }
         runtime.state.next('EXECUTING')
         await this.sessions.append(runtime, 'ssh-input', { content: command, source: 'ai', reason }, run.id)
-        const result = await this.terminal.execute(runtime, command, (prompt, kind) =>
-            this.handleInteractivePrompt(runtime, run, prompt, kind))
-        runtime.state.next('OBSERVING')
-        if (run.stopRequested) {
-            throw new DOMException('Agent stopped after command completion', 'AbortError')
+        await this.blocks.interrupt(run.id)
+        try {
+            const result = await this.terminal.execute(runtime, command, (prompt, kind) =>
+                this.handleInteractivePrompt(runtime, run, prompt, kind), run.controller.signal)
+            runtime.state.next('OBSERVING')
+            if (run.stopRequested) {
+                throw new DOMException('Agent stopped after command completion', 'AbortError')
+            }
+            return JSON.stringify({ exitCode: result.exitCode, output: result.output })
+        } finally {
+            if (!run.stopRequested && !run.controller.signal.aborted) {
+                await this.blocks.open(runtime, run.id, () => this.stop(runtime), this.nextEventSeq(runtime))
+            }
         }
-        return JSON.stringify({ exitCode: result.exitCode, output: result.output })
     }
 
     private async handleInteractivePrompt (
@@ -284,14 +303,19 @@ export class AgentService {
             }
         }
         if (value === null) {
-            const form = await this.interactions.requestForm({
-                sessionId: runtime.id,
-                runId: run.id,
-                prompt,
-                kind: kind === 'password' ? 'password' : 'text',
-            })
-            if (form.submitted) {
-                value = form.value
+            await this.blocks.open(runtime, run.id, () => this.stop(runtime), this.nextEventSeq(runtime))
+            try {
+                const form = await this.interactions.requestForm({
+                    sessionId: runtime.id,
+                    runId: run.id,
+                    prompt,
+                    kind: kind === 'password' ? 'password' : 'text',
+                })
+                if (form.submitted) {
+                    value = form.value
+                }
+            } finally {
+                await this.blocks.interrupt(run.id)
             }
         }
         if (value !== null) {
@@ -304,9 +328,18 @@ export class AgentService {
         runtime.state.next('EXECUTING')
         return value
     }
-}
 
-function isHigherRisk (next: CommandPolicyDecision, previous: CommandPolicyDecision): boolean {
-    const weight = { SAFE: 0, MODIFY: 1, DANGEROUS: 2, DENY: 3 }
-    return weight[next.risk] > weight[previous.risk]
+    private nextEventSeq (runtime: AISessionRuntime): number {
+        const events = runtime.events.value
+        return events.length ? events[events.length - 1].seq + 1 : 0
+    }
+
+    private async preserveLiveText (runtime: AISessionRuntime, run: ActiveRun): Promise<void> {
+        const content = runtime.liveText.value
+        if (!content) {
+            return
+        }
+        await this.sessions.append(runtime, 'ai-message', { content, partial: true }, run.id)
+        runtime.liveText.next('')
+    }
 }

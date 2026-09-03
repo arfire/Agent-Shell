@@ -24,12 +24,21 @@ try {
     $env:COREPACK_HOME = Join-Path $cacheRoot 'corepack'
     $env:YARN_CACHE_FOLDER = Join-Path $cacheRoot 'yarn'
     $env:NPM_CONFIG_CACHE = Join-Path $cacheRoot 'npm'
+    $env:ELECTRON_CACHE = Join-Path $cacheRoot 'electron-npmmirror'
+    $env:electron_config_cache = $env:ELECTRON_CACHE
     $env:ELECTRON_MIRROR = 'https://npmmirror.com/mirrors/electron/'
     $env:Path = "$(Join-Path $repoRoot 'scripts\.bin');$env:Path"
 
-    Write-Host "Preparing Yarn 1.22.22 with Node $nodeVersion..."
-    & corepack prepare yarn@1.22.22
-    Assert-NativeSuccess 'Yarn preparation'
+    if (Get-Command corepack -ErrorAction SilentlyContinue) {
+        Write-Host "Preparing Yarn 1.22.22 with Corepack and Node $nodeVersion..."
+        & corepack prepare yarn@1.22.22
+        Assert-NativeSuccess 'Yarn preparation'
+    }
+    else {
+        Write-Host "Corepack is unavailable; bootstrapping Yarn 1.22.22 with npx and Node $nodeVersion..."
+        & npx --yes yarn@1.22.22 --version
+        Assert-NativeSuccess 'Yarn bootstrap'
+    }
 
     # Install the root toolchain without running Tabby's native rebuild. Ash has
     # safe fallbacks for the optional native integrations, so Visual Studio is

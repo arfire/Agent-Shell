@@ -13,7 +13,8 @@ Combined Linux shell syntax is allowed inside one command step.
 Never claim success without verification. Never invent command output.
 The local policy engine, not you, determines approval requirements.
 If the user asks for analysis only or says not to execute, do not call tools.
-Keep user-facing explanations concise and describe the reason for every command.`
+Keep user-facing explanations concise and describe the reason for every command.
+Keep user-facing responses in GitHub-flavored Markdown and do not escape Markdown delimiters.`
 
 @Injectable({ providedIn: 'root' })
 export class AgentContextBuilder {

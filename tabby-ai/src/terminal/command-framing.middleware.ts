@@ -5,7 +5,9 @@ import { SessionMiddleware } from 'tabby-terminal'
 import { AIInputMiddleware } from './ai-input.middleware'
 
 interface PendingCommand {
+    beginMarker: string
     marker: string
+    beginPattern: RegExp
     pattern: RegExp
     buffer: string
     output: string
@@ -14,7 +16,9 @@ interface PendingCommand {
     input: AIInputMiddleware
     onPrompt?: (prompt: string, kind: InteractivePromptKind) => Promise<string|null>
     promptActive: boolean
-    lastPrompt?: string
+    started: boolean
+    signal?: AbortSignal
+    abortHandler?: () => void
 }
 
 export type InteractivePromptKind = 'password'|'yes-no'|'text'
@@ -22,6 +26,29 @@ export type InteractivePromptKind = 'password'|'yes-no'|'text'
 export interface CommandExecutionResult {
     output: string
     exitCode: number
+}
+
+function stripTerminalControls (content: string): string {
+    return content
+        .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '')
+        .replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, '')
+}
+
+function detectInteractivePrompt (content: string): { prompt: string, kind: InteractivePromptKind }|null {
+    const normalized = stripTerminalControls(content).replace(/\r(?!\n)/g, '\n')
+    const password = /([^\r\n]*(?:password|passphrase|密码|口令)[^\r\n]{0,160}[:：])\s*$/i.exec(normalized)
+    if (password) {
+        return { prompt: password[1].trim(), kind: 'password' }
+    }
+    const yesNo = /([^\r\n]*(?:\[[Yy](?:es)?\s*\/\s*[Nn](?:o)?\]|\[[Nn](?:o)?\s*\/\s*[Yy](?:es)?\]|\([Yy](?:es)?\s*\/\s*[Nn](?:o)?\)|\([Nn](?:o)?\s*\/\s*[Yy](?:es)?\)|continue\?|proceed\?|确认|是否)[^\r\n]*)\s*$/i.exec(normalized)
+    if (yesNo) {
+        return { prompt: yesNo[1].trim(), kind: 'yes-no' }
+    }
+    const text = /([^\r\n]{2,240}(?:enter|input|select|choose|provide|port|path|name|请输入|请选择|输入|端口|路径|名称)[^\r\n]*[:：])\s*$/i.exec(normalized)
+    if (text) {
+        return { prompt: text[1].trim(), kind: 'text' }
+    }
+    return null
 }
 
 export class CommandFramingMiddleware extends SessionMiddleware {
@@ -35,6 +62,14 @@ export class CommandFramingMiddleware extends SessionMiddleware {
         }
         const pending = this.pending
         pending.buffer += this.decoder.write(data)
+        if (!pending.started) {
+            const begin = pending.beginPattern.exec(pending.buffer)
+            if (!begin) {
+                return
+            }
+            pending.buffer = pending.buffer.substring(begin.index + begin[0].length)
+            pending.started = true
+        }
         this.detectPrompt(pending)
         const match = pending.pattern.exec(pending.buffer)
         if (match) {
@@ -48,6 +83,7 @@ export class CommandFramingMiddleware extends SessionMiddleware {
                 this.outputToTerminal.next(Buffer.from(after, 'utf8'))
             }
             this.pending = null
+            this.removeAbortHandler(pending)
             pending.resolve({ output: pending.output, exitCode: Number(match[1]) })
             return
         }
@@ -62,6 +98,10 @@ export class CommandFramingMiddleware extends SessionMiddleware {
     }
 
     feedFromTerminal (data: Buffer): void {
+        if (this.pending && data.length === 1 && data[0] === 3) {
+            this.cancel(new DOMException('Command interrupted by user', 'AbortError'))
+            return
+        }
         this.outputToSession.next(data)
     }
 
@@ -69,14 +109,22 @@ export class CommandFramingMiddleware extends SessionMiddleware {
         command: string,
         input: AIInputMiddleware,
         onPrompt?: (prompt: string, kind: InteractivePromptKind) => Promise<string|null>,
+        signal?: AbortSignal,
     ): Promise<CommandExecutionResult> {
         if (this.pending) {
             return Promise.reject(new Error('Another AI command is already running in this terminal'))
         }
-        const marker = `__TABBY_AI_END_${crypto.randomUUID().replaceAll('-', '')}`
+        if (signal?.aborted) {
+            return Promise.reject(signal.reason ?? new DOMException('Agent stopped', 'AbortError'))
+        }
+        const nonce = crypto.randomUUID().replaceAll('-', '')
+        const beginMarker = `__TABBY_AI_BEGIN_${nonce}`
+        const marker = `__TABBY_AI_END_${nonce}`
         return new Promise((resolve, reject) => {
-            this.pending = {
+            const pending: PendingCommand = {
+                beginMarker,
                 marker,
+                beginPattern: new RegExp(`${beginMarker}\\r?\\n`),
                 pattern: new RegExp(`${marker}:(-?\\d+)\\r?\\n?`),
                 buffer: '',
                 output: '',
@@ -85,16 +133,34 @@ export class CommandFramingMiddleware extends SessionMiddleware {
                 input,
                 onPrompt,
                 promptActive: false,
+                started: false,
+                signal,
             }
-            const wrapped = `{\n${command}\n__tabby_ai_exit=$?\nprintf '\\n${marker}:%s\\n' "$__tabby_ai_exit"\n}\n`
+            pending.abortHandler = () => this.cancel(signal?.reason)
+            signal?.addEventListener('abort', pending.abortHandler, { once: true })
+            this.pending = pending
+            const encoded = Buffer.from(command, 'utf8').toString('base64')
+            const wrapped = `printf '\\n${beginMarker}\\n'; __tabby_ai_cmd=$(printf '%s' '${encoded}' | base64 -d); eval "$__tabby_ai_cmd"; __tabby_ai_exit=$?; printf '\\n${marker}:%s\\n' "$__tabby_ai_exit"; unset __tabby_ai_cmd __tabby_ai_exit\n`
             input.sendAgent(wrapped)
         })
+    }
+
+    cancel (reason?: unknown): void {
+        if (!this.pending) {
+            return
+        }
+        const pending = this.pending
+        this.pending = null
+        this.removeAbortHandler(pending)
+        pending.input.sendAgent(Buffer.from([3]))
+        pending.reject(reason instanceof Error ? reason : new DOMException('Agent stopped', 'AbortError'))
     }
 
     close (): void {
         if (this.pending) {
             const pending = this.pending
             this.pending = null
+            this.removeAbortHandler(pending)
             pending.reject(new Error('SSH session closed before the AI command completed'))
         }
         this.decoder.end()
@@ -107,33 +173,29 @@ export class CommandFramingMiddleware extends SessionMiddleware {
         }
         const tail = `${pending.output}${pending.buffer}`.slice(-1000)
         const detected = detectInteractivePrompt(tail)
-        if (!detected || detected.prompt === pending.lastPrompt) {
+        if (!detected) {
             return
         }
-        pending.lastPrompt = detected.prompt
         pending.promptActive = true
-        void pending.onPrompt(detected.prompt, detected.kind).then(value => {
-            if (value !== null && this.pending === pending) {
-                pending.input.sendAgent(`${value}\n`)
-            }
-        }).finally(() => {
-            pending.promptActive = false
-        })
+        void pending.onPrompt(detected.prompt, detected.kind)
+            .then(value => {
+                if (value !== null && this.pending === pending) {
+                    pending.input.sendAgent(`${value}\n`)
+                }
+            })
+            .catch(error => {
+                if (this.pending === pending) {
+                    this.cancel(error)
+                }
+            })
+            .finally(() => {
+                pending.promptActive = false
+            })
     }
-}
 
-function detectInteractivePrompt (content: string): { prompt: string, kind: InteractivePromptKind }|null {
-    const password = /([^\r\n]*(?:password|passphrase|密码|口令)[^\r\n]{0,160}:)\s*$/i.exec(content)
-    if (password) {
-        return { prompt: password[1].trim(), kind: 'password' }
+    private removeAbortHandler (pending: PendingCommand): void {
+        if (pending.signal && pending.abortHandler) {
+            pending.signal.removeEventListener('abort', pending.abortHandler)
+        }
     }
-    const yesNo = /([^\r\n]*(?:\[[Yy]\/\s*[Nn]\]|\[[Nn]\/\s*[Yy]\]|\([Yy]es\/[Nn]o\)|\([Nn]o\/[Yy]es\)|continue\?)[^\r\n]*)\s*$/i.exec(content)
-    if (yesNo) {
-        return { prompt: yesNo[1].trim(), kind: 'yes-no' }
-    }
-    const text = /([^\r\n]{2,200}(?:enter|input|select|choose|请输入|请选择)[^\r\n]*[:：])\s*$/i.exec(content)
-    if (text) {
-        return { prompt: text[1].trim(), kind: 'text' }
-    }
-    return null
 }

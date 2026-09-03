@@ -40,3 +40,4 @@ sentry-symbols.js
 crowdin.yml
 .crowdin.env
 *.md
+!AGENTS.md

@@ -1,52 +1,74 @@
-.ai-block
-    .ai-header
+.ai-block([class.collapsed]='collapsed')
+    .ai-header(#header='')
         .ai-title
             i.fas.fa-sparkles
             span AI
         .ai-state {{ state }}
-        button.btn.btn-sm.btn-outline-light(*ngIf='isActive()', (click)='stop()') Stop
+        button.btn.btn-sm.btn-outline-light(*ngIf='isActive()', (mousedown)='$event.stopPropagation()', (click)='stop($event)') Stop
+        button.btn.btn-sm.btn-link.ai-collapse(
+            type='button',
+            [attr.aria-label]='collapsed ? "Expand AI window" : "Collapse AI window"',
+            [attr.title]='collapsed ? "Expand" : "Collapse"',
+            (click)='toggleCollapsed($event)'
+        )
+            i.fas([class.fa-chevron-down]='collapsed', [class.fa-chevron-up]='!collapsed')
 
-    .ai-body
-        ng-container(*ngFor='let event of getMessages()')
-            .ai-message(*ngIf='event.type === "ai-message"') {{ event.data.content }}
-            .ai-error(*ngIf='event.type === "error"') {{ event.data.message }}
+    .ai-body(#body='', (wheel)='onWheel($event)')
+        .ai-body-content(#content='')
+            ng-container(*ngFor='let event of getMessages()')
+                .ai-message.markdown-content(*ngIf='event.type === "ai-message"', [innerHTML]='getMessageHTML(event)')
+                .ai-error(*ngIf='event.type === "error"') {{ event.data.message }}
 
-        .ai-message.streaming(*ngIf='liveText') {{ liveText }}
+            .ai-message.streaming.markdown-content(*ngIf='liveText', [innerHTML]='getLiveTextHTML()')
 
-        .executed-command(*ngFor='let event of getCommands()')
-            .command-meta
-                span.badge {{ event.data.risk }}
-                span {{ event.data.reason }}
-            code $ {{ event.data.command }}
+            .executed-command(*ngFor='let event of getCommands()')
+                .command-meta
+                    span.badge {{ getCommandRisk(event) || 'COMMAND' }}
+                    span {{ getCommandReason(event) || 'Preparing command' }}
+                code $ {{ getCommandContent(event) || '(empty command)' }}
 
-        .command-card(*ngFor='let request of requests')
-            .command-meta
-                span.badge([class.badge-danger]='request.risk === "DANGEROUS"', [class.badge-warning]='request.risk === "MODIFY"') {{ request.risk }}
-                span {{ request.reason }}
-            textarea.form-control.command-input(
-                rows='2',
-                [ngModel]='getCommand(request)',
-                (ngModelChange)='setCommand(request, $event)'
-            )
-            .command-actions
-                button.btn.btn-sm.btn-secondary((click)='reject(request)') Reject
-                button.btn.btn-sm.btn-danger(
-                    *ngIf='request.confirmationsRequired > 1 && confirmations.has(request.id)',
-                    (click)='approve(request)'
-                ) Confirm execution
-                button.btn.btn-sm.btn-primary(
-                    *ngIf='request.confirmationsRequired === 1 || !confirmations.has(request.id)',
-                    (click)='approve(request)'
-                ) Execute
+            .command-card(*ngFor='let request of requests')
+                .command-meta
+                    span.badge([class.badge-danger]='request.risk === "DANGEROUS"', [class.badge-warning]='request.risk === "MODIFY"') {{ request.risk }}
+                    span {{ getRequestReason(request) }}
+                .approval-command-preview $ {{ getCommand(request) || '(empty command)' }}
+                textarea.form-control.command-input(
+                    #commandInput='',
+                    rows='2',
+                    [value]='getCommand(request)',
+                    (input)='updateCommandFromEvent(request, $event)',
+                    (keydown)='stopTerminalEvent($event)',
+                    (keyup)='stopTerminalEvent($event)',
+                    (mousedown)='stopTerminalEvent($event)',
+                    (click)='stopTerminalEvent($event)',
+                    spellcheck='false'
+                )
+                .command-actions
+                    button.btn.btn-sm.btn-secondary((mousedown)='$event.stopPropagation()', (click)='reject(request)') Reject
+                    button.btn.btn-sm.btn-danger(
+                        *ngIf='isAwaitingFinalConfirmation(request)',
+                        (mousedown)='$event.stopPropagation()',
+                        (click)='approve(request)'
+                    ) Confirm execution
+                    button.btn.btn-sm.btn-primary(
+                        *ngIf='!isAwaitingFinalConfirmation(request)',
+                        (mousedown)='$event.stopPropagation()',
+                        (click)='approve(request)'
+                    ) Execute
 
-        .command-card(*ngFor='let form of forms')
-            .command-meta {{ form.prompt }}
-            input.form-control(
-                [type]='form.kind === "password" ? "password" : "text"',
-                [ngModel]='formValues.get(form.id)',
-                (ngModelChange)='formValues.set(form.id, $event)',
-                (keyup.enter)='submitForm(form)',
-                autocomplete='off'
-            )
-            .command-actions
-                button.btn.btn-sm.btn-primary((click)='submitForm(form)') Submit
+            .command-card(*ngFor='let form of forms')
+                .command-meta {{ form.prompt }}
+                input.form-control(
+                    #formInput='',
+                    [type]='form.kind === "password" ? "password" : "text"',
+                    [ngModel]='formValues.get(form.id)',
+                    (ngModelChange)='formValues.set(form.id, $event)',
+                    (keyup.enter)='submitForm(form)',
+                    (keydown)='stopTerminalEvent($event)',
+                    (keyup)='stopTerminalEvent($event)',
+                    (mousedown)='stopTerminalEvent($event)',
+                    (click)='stopTerminalEvent($event)',
+                    autocomplete='off'
+                )
+                .command-actions
+                    button.btn.btn-sm.btn-primary((mousedown)='$event.stopPropagation()', (click)='submitForm(form)') Submit
