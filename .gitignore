@@ -53,3 +53,4 @@ crowdin.yml
 .crowdin.env
 *.md
 !AGENTS.md
+!/README.md
