@@ -4,6 +4,18 @@ app/assets/webpack
 node_modules
 /.build-cache
 /data
+/app/data
+/logs
+/app/logs
+
+# Local environment overrides may contain credentials.
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Runtime and verification logs; test source files remain tracked.
+*.log
 
 build/files.wxs
 dist
