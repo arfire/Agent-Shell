@@ -21,7 +21,7 @@ const RISK_WEIGHT: Record<CommandRisk, number> = {
 export class CommandPolicyService {
     constructor (private configService: AIConfigService) { }
 
-    evaluate (command: string): CommandPolicyDecision {
+    evaluate (command: string, shell?: string): CommandPolicyDecision {
         const commands = splitShellCommands(command)
         let result: CommandPolicyDecision = {
             risk: 'SAFE',
@@ -38,6 +38,11 @@ export class CommandPolicyService {
             if (RISK_WEIGHT[decision.risk] > RISK_WEIGHT[result.risk]) {
                 result = { ...decision, commands }
             }
+        }
+        // POSIX allow rules cannot establish the safety of PowerShell expressions
+        // or Fish command substitutions. Keep deny rules and require two approvals.
+        if (result.risk !== 'DENY' && (shell === 'powershell' || shell === 'fish' && /[()]/.test(command))) {
+            result = { ...result, risk: 'DANGEROUS', reason: 'This shell syntax requires explicit review and two confirmations.' }
         }
         return result
     }

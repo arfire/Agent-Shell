@@ -41,8 +41,10 @@ export class AgentInteractionService {
 
     request (value: Omit<ApprovalRequest, 'id'>): Promise<ApprovalResponse> {
         const request = { ...value, id: crypto.randomUUID() }
-        this.requests.next([...this.requests.value, request])
-        return new Promise(resolve => this.resolvers.set(request.id, resolve))
+        return new Promise(resolve => {
+            this.resolvers.set(request.id, resolve)
+            this.requests.next([...this.requests.value, request])
+        })
     }
 
     resolve (requestId: string, response: ApprovalResponse): void {
@@ -57,8 +59,10 @@ export class AgentInteractionService {
 
     requestForm (value: Omit<FormRequest, 'id'>): Promise<FormResponse> {
         const request = { ...value, id: crypto.randomUUID() }
-        this.forms.next([...this.forms.value, request])
-        return new Promise(resolve => this.formResolvers.set(request.id, resolve))
+        return new Promise(resolve => {
+            this.formResolvers.set(request.id, resolve)
+            this.forms.next([...this.forms.value, request])
+        })
     }
 
     resolveForm (requestId: string, response: FormResponse): void {

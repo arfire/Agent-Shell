@@ -4,6 +4,9 @@ import { SessionMiddleware } from 'tabby-terminal'
 
 import { AIInputMiddleware } from './ai-input.middleware'
 import { detectInteractivePrompt, InteractivePromptKind } from './interactive-prompt'
+import { ShellKind } from './shell-integration'
+
+export type CommandOutputFilter = ((content: string) => string) & { flush?: () => string }
 
 interface PendingCommand {
     beginMarker: string
@@ -20,7 +23,8 @@ interface PendingCommand {
     started: boolean
     signal?: AbortSignal
     abortHandler?: () => void
-    outputFilter?: (content: string) => string
+    outputFilter?: CommandOutputFilter
+    cancelled?: boolean
 }
 
 export { InteractivePromptKind } from './interactive-prompt'
@@ -33,6 +37,25 @@ export interface CommandExecutionResult {
 export class CommandFramingMiddleware extends SessionMiddleware {
     private pending: PendingCommand|null = null
     private decoder = new StringDecoder('utf8')
+
+    get isExecuting (): boolean { return this.pending !== null }
+
+    /** Transfer the running program without cancelling it or dropping framing. */
+    releaseControl (): void {
+        if (this.pending) {
+            this.removeAbortHandler(this.pending)
+            this.pending.onPrompt = undefined
+        }
+    }
+
+    promptReady (): void {
+        const pending = this.pending
+        if (pending?.cancelled) {
+            this.emitVisible(pending, this.stripPartialEndMarker(pending))
+            this.flushFilter(pending)
+            this.pending = null
+        }
+    }
 
     feedFromSession (data: Buffer): void {
         if (!this.pending) {
@@ -55,6 +78,7 @@ export class CommandFramingMiddleware extends SessionMiddleware {
             const before = pending.buffer.substring(0, match.index)
             const after = pending.buffer.substring(match.index + match[0].length)
             this.emitVisible(pending, before)
+            this.flushFilter(pending)
             if (after) {
                 this.outputToTerminal.next(Buffer.from(after, 'utf8'))
             }
@@ -85,7 +109,8 @@ export class CommandFramingMiddleware extends SessionMiddleware {
         input: AIInputMiddleware,
         onPrompt?: (prompt: string, kind: InteractivePromptKind) => Promise<string|null>,
         signal?: AbortSignal,
-        outputFilter?: (content: string) => string,
+        outputFilter?: CommandOutputFilter,
+        shell: ShellKind = 'bash',
     ): Promise<CommandExecutionResult> {
         if (this.pending) {
             return Promise.reject(new Error('Another AI command is already running in this terminal'))
@@ -100,8 +125,8 @@ export class CommandFramingMiddleware extends SessionMiddleware {
             const pending: PendingCommand = {
                 beginMarker,
                 marker,
-                beginPattern: new RegExp(`${beginMarker}\\r?\\n`),
-                pattern: new RegExp(`${marker}:(-?\\d+)\\r?\\n?`),
+                beginPattern: new RegExp(`\\x1b\\]777;${beginMarker}(?:\\x07|\\x1b\\\\)`),
+                pattern: new RegExp(`\\x1b\\]777;${marker}:(-?\\d+)(?:\\x07|\\x1b\\\\)`),
                 buffer: '',
                 output: '',
                 resolve,
@@ -117,23 +142,30 @@ export class CommandFramingMiddleware extends SessionMiddleware {
             signal?.addEventListener('abort', pending.abortHandler, { once: true })
             this.pending = pending
             const encoded = Buffer.from(command, 'utf8').toString('base64')
-            const wrapped = `printf '\\n${beginMarker}\\n'; __tabby_ai_cmd=$(printf '%s' '${encoded}' | base64 -d); eval "$__tabby_ai_cmd"; __tabby_ai_exit=$?; printf '\\n${marker}:%s\\n' "$__tabby_ai_exit"; unset __tabby_ai_cmd __tabby_ai_exit\n`
+            let wrapped = `printf '\\033]777;${beginMarker}\\007'; __tabby_ai_cmd=$(printf '%s' '${encoded}' | base64 -d); eval "$__tabby_ai_cmd"; __tabby_ai_exit=$?; printf '\\033]777;${marker}:%s\\007' "$__tabby_ai_exit"; unset __tabby_ai_cmd __tabby_ai_exit\n`
+            if (shell === 'fish') {
+                wrapped = `printf '\\033]777;${beginMarker}\\007'; eval (printf '%s' '${encoded}' | base64 -d | string collect); set -l __tabby_ai_exit $status; printf '\\033]777;${marker}:%s\\007' $__tabby_ai_exit\n`
+            } else if (shell === 'powershell') {
+                wrapped = `[Console]::Write("$([char]27)]777;${beginMarker}$([char]7)"); $global:LASTEXITCODE=0; try { . ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}')))); $__tabby_ai_ok=$?; $__tabby_ai_exit=if ($LASTEXITCODE) {$LASTEXITCODE} elseif ($__tabby_ai_ok) {0} else {1} } catch { Write-Error $_; $__tabby_ai_exit=1 }; [Console]::Write("$([char]27)]777;${marker}:$__tabby_ai_exit$([char]7)"); Remove-Variable __tabby_ai_ok,__tabby_ai_exit\r`
+            }
             input.sendAgent(wrapped)
         })
     }
 
     cancel (reason?: unknown): void {
-        if (!this.pending) {
+        if (!this.pending || this.pending.cancelled) {
             return
         }
         const pending = this.pending
-        this.pending = null
+        pending.cancelled = true
         this.removeAbortHandler(pending)
         if (pending.started && pending.buffer) {
             this.emitVisible(pending, this.stripPartialEndMarker(pending))
             pending.buffer = ''
         }
-        pending.input.sendAgent(Buffer.from([3]))
+        // Sending via the input middleware would re-enter this middleware's
+        // Ctrl+C handler and swallow the interrupt as an already-cancelled run.
+        this.outputToSession.next(Buffer.from([3]))
         pending.reject(reason instanceof Error ? reason : new DOMException('Agent stopped', 'AbortError'))
     }
 
@@ -145,6 +177,7 @@ export class CommandFramingMiddleware extends SessionMiddleware {
             if (pending.started && pending.buffer) {
                 this.emitVisible(pending, this.stripPartialEndMarker(pending))
             }
+            this.flushFilter(pending)
             pending.reject(new Error('SSH session closed before the AI command completed'))
         }
         this.decoder.end()
@@ -170,12 +203,12 @@ export class CommandFramingMiddleware extends SessionMiddleware {
         }
         void pending.onPrompt(detected.prompt, detected.kind)
             .then(value => {
-                if (value !== null && this.pending === pending) {
+                if (value !== null && this.pending === pending && pending.onPrompt && !pending.cancelled) {
                     pending.input.sendAgent(`${value}\n`)
                 }
             })
             .catch(error => {
-                if (this.pending === pending) {
+                if (this.pending === pending && pending.onPrompt) {
                     this.cancel(error)
                 }
             })
@@ -202,7 +235,13 @@ export class CommandFramingMiddleware extends SessionMiddleware {
     }
 
     private stripPartialEndMarker (pending: PendingCommand): string {
-        const markerStart = pending.buffer.indexOf(pending.marker)
+        const markerStart = pending.buffer.indexOf('\x1b]777;__TABBY_AI_')
         return markerStart === -1 ? pending.buffer : pending.buffer.substring(0, markerStart)
+    }
+
+    private flushFilter (pending: PendingCommand): void {
+        const tail = pending.outputFilter?.flush?.() ?? ''
+        pending.output += tail
+        if (tail) { this.outputToTerminal.next(Buffer.from(tail)) }
     }
 }

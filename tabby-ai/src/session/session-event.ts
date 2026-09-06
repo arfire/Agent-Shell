@@ -4,6 +4,7 @@ export type SessionEventType =
     'ssh-output' |
     'ai-message' |
     'ai-command' |
+    'command-result' |
     'approval' |
     'interaction' |
     'agent-state' |

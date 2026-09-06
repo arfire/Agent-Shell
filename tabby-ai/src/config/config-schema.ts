@@ -23,6 +23,8 @@ export interface AIConfig {
     inputDetection: {
         shellCommands: string[]
         shellPatterns: string[]
+        forceAgentShortcut?: string
+        forceShellShortcut?: string
     }
     policy: {
         defaultRisk: CommandRisk
@@ -65,7 +67,7 @@ export function validateAIConfig (value: unknown): asserts value is AIConfig {
     if (!Number.isInteger(config.agent.recentOutputLines) || config.agent.recentOutputLines < 1) {
         throw new Error('agent.recentOutputLines must be a positive integer')
     }
-    if (!Array.isArray(config.inputDetection?.shellCommands) || !Array.isArray(config.inputDetection?.shellPatterns)) {
+    if (!Array.isArray(config.inputDetection?.shellCommands) || !Array.isArray(config.inputDetection.shellPatterns)) {
         throw new Error('inputDetection command and pattern lists must be arrays')
     }
     if (!['SAFE', 'MODIFY', 'DANGEROUS', 'DENY'].includes(config.policy?.defaultRisk)) {

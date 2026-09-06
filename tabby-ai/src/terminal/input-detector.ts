@@ -2,13 +2,45 @@ import { Injectable } from '@angular/core'
 
 import { AIConfigService } from '../config/ai-config.service'
 
-function firstMeaningfulLine (input: string): string {
-    if (!/[\r\n]/.test(input)) {
-        return input
+export function unwrapShellFence (input: string): string {
+    const match = /^\s*```(?:bash|sh|zsh|fish|powershell|pwsh|shell)?\s*\r?\n([\s\S]*?)\r?\n```\s*$/i.exec(input)
+    return match ? match[1] : input
+}
+
+/** Return logical statement starts, skipping quoted/continued lines and heredoc bodies. */
+export function shellStatementLines (input: string): string[] {
+    const result: string[] = []
+    const heredocs: { delimiter: string, tabs: boolean }[] = []
+    let quote = ''
+    let continued = false
+    for (const line of input.replace(/\r\n?/g, '\n').split('\n')) {
+        if (heredocs.length) {
+            const doc = heredocs[0]
+            if ((doc.tabs ? line.replace(/^\t+/, '') : line) === doc.delimiter) { heredocs.shift() }
+            continue
+        }
+        const trimmed = line.trim()
+        if (!quote && (!trimmed || /^#(?!\!)/.test(trimmed))) { continue }
+        if (!quote && !continued) { result.push(trimmed) }
+        let escaped = false
+        let unquoted = ''
+        for (const char of line) {
+            if (escaped) { escaped = false; continue }
+            if (char === '\\' && quote !== '\'') { escaped = true; continue }
+            if (quote) {
+                if (char === quote) { quote = '' }
+            } else if (char === '\'' || char === '"') {
+                quote = char
+            } else {
+                unquoted += char
+            }
+        }
+        continued = escaped || /(?:\|\|?|&&)\s*$/.test(unquoted)
+        for (const match of line.matchAll(/<<(-)?\s*(['"]?)([\w.-]+)\2/g)) {
+            heredocs.push({ delimiter: match[3], tabs: !!match[1] })
+        }
     }
-    const lines = input.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
-    const candidate = lines.find(line => !line.startsWith('```') && !/^#(?!\!)/.test(line))
-    return candidate ?? (lines.length ? lines[0] : '')
+    return result
 }
 
 function extractFirstToken (input: string): string {
@@ -42,17 +74,28 @@ function looksLikeNaturalLanguage (input: string): boolean {
 export class AIInputDetector {
     constructor (private configService: AIConfigService) { }
 
-    isShellCommand (input: string): boolean {
-        const value = input.trim()
+    isShellCommand (input: string, shell?: string): boolean {
+        const value = unwrapShellFence(input).trim()
         if (!value) {
             return true
         }
-        const firstLine = firstMeaningfulLine(value)
-        if (firstLine !== value) {
-            return this.isShellCommand(firstLine)
+        if (/[\r\n]/.test(value)) {
+            const statements = shellStatementLines(value)
+            if (!statements.length) { return true }
+            // A script with a declared interpreter or compound shell structure is one unit.
+            if (/^(?:#!|if\s|for\s|while\s|until\s|case\s|function\s)/.test(statements[0])) {
+                return true
+            }
+            return statements.every(line => this.isShellCommand(line, shell))
         }
         const config = this.configService.config.inputDetection
         const firstToken = extractFirstToken(value)
+        if (shell === 'powershell' && /^(?:(?:Get|Set|New|Remove|Copy|Move|Rename|Test|Write|Read|Select|Where|ForEach|Sort|Format|Out|Invoke|Import|Export|Start|Stop|Restart|Clear|Add|Update|Resolve|Join|Split|Push|Pop)-[A-Za-z][\w-]*|[A-Za-z]:\\|\.\\)/i.test(firstToken)) {
+            return true
+        }
+        if (shell === 'fish' && /^(?:functions|end|begin|switch|abbr|status|fish)(?:\s|$)/.test(value)) {
+            return true
+        }
         if (config.shellCommands.some(command => command.toLowerCase() === firstToken.toLowerCase())) {
             return true
         }

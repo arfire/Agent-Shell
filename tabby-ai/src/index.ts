@@ -10,11 +10,11 @@ import { TerminalDecorator } from 'tabby-terminal'
 import { AISettingsTabComponent } from './components/aiSettingsTab.component'
 import { AISettingsTabProvider } from './settings'
 import { AITerminalDecorator } from './terminal/ai-terminal.decorator'
-import { AIInlineBlockComponent } from './ui/ai-inline-block.component'
+import { AgentDockComponent } from './ui/agent-dock.component'
 
 @NgModule({
     imports: [CommonModule, FormsModule, NgbModule, ToastrModule],
-    declarations: [AISettingsTabComponent, AIInlineBlockComponent],
+    declarations: [AISettingsTabComponent, AgentDockComponent],
     providers: [
         { provide: SettingsTabProvider, useClass: AISettingsTabProvider, multi: true },
         { provide: TerminalDecorator, useClass: AITerminalDecorator, multi: true },

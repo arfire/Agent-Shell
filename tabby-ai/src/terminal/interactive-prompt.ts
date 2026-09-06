@@ -4,6 +4,7 @@ function stripTerminalControls (content: string): string {
     return content
         .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '')
         .replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, '')
+        .replace(/\x1b[ -\/]*[0-~]/g, '')
 }
 
 export function detectInteractivePrompt (content: string): { prompt: string, kind: InteractivePromptKind }|null {
@@ -24,6 +25,6 @@ export function detectInteractivePrompt (content: string): { prompt: string, kin
 }
 
 export function looksLikeShellPrompt (content: string): boolean {
-    const normalized = stripTerminalControls(content).replace(/\r(?!\n)/g, '\n')
+    const normalized = stripTerminalControls(content).replace(/\r(?!\n)/g, '')
     return /(?:^|\n)[^\r\n]{0,200}(?:[$#>%])\s*$/u.test(normalized)
 }

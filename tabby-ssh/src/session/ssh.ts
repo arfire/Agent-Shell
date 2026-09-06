@@ -7,7 +7,7 @@ import { Injector } from '@angular/core'
 import { NgbModal } from '@ng-bootstrap/ng-bootstrap'
 import { ConfigService, FileProvidersService, NotificationsService, PromptModalComponent, LogService, Logger, TranslateService, Platform, HostAppService } from 'tabby-core'
 import { Socket } from 'net'
-import { Subject, Observable } from 'rxjs'
+import { Subject, Observable, Subscription } from 'rxjs'
 import { HostKeyPromptModalComponent } from '../components/hostKeyPromptModal.component'
 import { PasswordStorageService } from '../services/passwordStorage.service'
 import { SSHKnownHostsService } from '../services/sshKnownHosts.service'
@@ -876,6 +876,37 @@ export class SSHSession {
         }
         await ch.requestShell()
         return ch
+    }
+
+    /** Run a bounded, non-PTY capability probe without typing into the user's shell. */
+    async probeShell (): Promise<string> {
+        if (!(this.ssh instanceof russh.AuthenticatedSSHClient)) {
+            throw new Error('SSH authentication is not complete')
+        }
+        const channel = await this.ssh.activateChannel(await this.ssh.openSessionChannel())
+        let output = ''
+        let timer: ReturnType<typeof setTimeout>|undefined = undefined
+        const completed = new Subscription()
+        try {
+            await new Promise<void>((resolve, reject) => {
+                timer = setTimeout(() => reject(new Error('Shell detection timed out')), 5000)
+                completed.add(channel.data$.subscribe(data => {
+                    output = (output + Buffer.from(data).toString('utf8')).slice(-4096)
+                    // Native callbacks for data and EOF may arrive on different queues.
+                    // An explicit end token ensures we actually received the identity.
+                    if (output.includes('__ASH_SHELL_END__')) { resolve() }
+                }))
+                // These are shell identity variables only, never user input or environment dumps.
+                // Keep the short-lived exec channel alive long enough for native data
+                // callbacks to drain before the remote close notification is dispatched.
+                void channel.requestExec('echo __ASH_SHELL__ $SHELL $PSVersionTable.PSEdition __ASH_SHELL_END__; sleep 0.1').catch(reject)
+            })
+            return output
+        } finally {
+            clearTimeout(timer)
+            completed.unsubscribe()
+            await channel.close()
+        }
     }
 
     private setupSocketChannelEvents (channel: russh.Channel, socket: Socket, logPrefix: string): void {

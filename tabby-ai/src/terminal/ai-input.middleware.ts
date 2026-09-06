@@ -1,62 +1,81 @@
-import { SessionMiddleware } from 'tabby-terminal'
+import { SessionMiddleware, XTermFrontend } from 'tabby-terminal'
 import { StringDecoder } from 'string_decoder'
 
-import { AIInputDetector } from './input-detector'
+import { AIInputDetector, unwrapShellFence } from './input-detector'
 import { AISessionRuntime, AISessionService } from '../session/ai-session.service'
-import { detectInteractivePrompt, looksLikeShellPrompt } from './interactive-prompt'
+import { ShellIntegration } from './shell-integration'
+import { terminalText } from './terminal-text'
 
-interface TerminalInputAction {
-    output?: string
-    aiInput?: string
-}
+export type InputRoute = 'auto'|'shell'|'agent'
 
+/** Local drafts occupy xterm cells, never a second DOM input or the remote PTY. */
 export class AIInputMiddleware extends SessionMiddleware {
-    private buffer: string[] = []
-    private cursor = 0
+    private buffer = ''
     private decoder = new StringDecoder('utf8')
-    private sessionDecoder = new StringDecoder('utf8')
-    private recentSessionOutput = ''
-    private interactiveInputExpected = false
-    private pendingAIInput?: string
-    private pendingAIStartTimer?: ReturnType<typeof setTimeout>
-    private escapeSequence = ''
-    private bracketedPaste = false
-    private bracketedPasteContent = ''
-    private bracketedPasteStartedWithInput = false
-    private ignoreNextLineFeed = false
-    private bufferReliable = true
+    private escape = ''
+    private paste = false
+    private pasteContent = ''
+    private handedOff = false
+    private closed = false
+    private anchor?: { line: number, isDisposed: boolean, dispose: () => void }
+    private anchorColumn = 0
+    private anchorColumns = 0
+    private promptCellOffset = 0
+    private queue = Promise.resolve()
 
     constructor (
         private runtime: AISessionRuntime,
         private sessions: AISessionService,
         private detector: AIInputDetector,
+        public readonly integration: ShellIntegration,
         private onAIRequest: (input: string) => void,
         private onBlockedInput: () => void,
     ) {
         super()
+        integration.prompt.subscribe(() => {
+            this.handedOff = false
+            this.anchor?.dispose()
+            this.anchor = undefined
+        })
     }
 
+    get canCapture (): boolean {
+        return !this.closed && this.integration.mode.value === 'agent' && this.integration.ready &&
+            !this.integration.alternateScreen && !this.handedOff && !this.runtime.locked
+    }
+
+    get hasInput (): boolean { return !!this.buffer }
+
     feedFromSession (data: Buffer): void {
-        this.recentSessionOutput = `${this.recentSessionOutput}${this.sessionDecoder.write(data)}`.slice(-1200)
-        if (detectInteractivePrompt(this.recentSessionOutput)) {
-            this.interactiveInputExpected = true
-        } else if (looksLikeShellPrompt(this.recentSessionOutput)) {
-            this.interactiveInputExpected = false
-        }
-        this.outputToTerminal.next(data)
-        if (this.pendingAIInput && looksLikeShellPrompt(this.recentSessionOutput)) {
-            this.startPendingAIRequest()
+        if (this.buffer && this.canCapture) {
+            this.enqueue(async () => {
+                await this.erase()
+                this.outputToTerminal.next(data)
+                await this.runtime.tab.write('')
+                await this.runtime.tab.write('\r\n' + this.integration.promptText)
+                this.anchor?.dispose()
+                this.anchor = undefined
+                this.captureAnchor()
+                await this.paint()
+            })
+        } else {
+            this.outputToTerminal.next(data)
         }
     }
 
     feedFromTerminal (data: Buffer): void {
-        if (this.pendingAIInput) {
-            if (data.length === 1 && data[0] === 3) {
-                this.pendingAIInput = undefined
-                if (this.pendingAIStartTimer) {
-                    clearTimeout(this.pendingAIStartTimer)
-                    this.pendingAIStartTimer = undefined
-                }
+        // Device/status replies and focus notifications are terminal protocol, not typed drafts.
+        if (/^\x1b\[(?:\??\d+;\d+R|[?>]?[\d;]*c|\??\d+;\d+\$y|[IO])$/.test(data.toString())) {
+            this.sendAgent(data)
+            return
+        }
+        if (this.integration.mode.value === 'shell' || this.integration.alternateScreen) {
+            this.integration.commandStarted()
+            this.sendAgent(data)
+            return
+        }
+        if (this.integration.state.value === 'initializing') {
+            if (data.equals(Buffer.from('\r')) && !this.buffer) {
                 this.sendAgent(data)
             } else {
                 this.onBlockedInput()
@@ -64,320 +83,239 @@ export class AIInputMiddleware extends SessionMiddleware {
             return
         }
         if (this.runtime.locked) {
-            if (data.length === 1 && data[0] === 3) {
-                this.outputToSession.next(data)
+            if (data.equals(Buffer.from([3]))) {
+                this.runtime.stopAgent?.()
             } else {
                 this.onBlockedInput()
             }
             return
         }
-
-        // xterm emits one committed IME composition as a single chunk. Keep
-        // that chunk intact on the session side: splitting it into individual
-        // Unicode characters creates one SSH write per character, which adds
-        // latency and can interleave Chinese input with remote echo updates.
-        let output = ''
-        const flush = (): void => {
-            if (output) {
-                this.sendAgent(output)
-                output = ''
+        const input = this.decoder.write(data)
+        this.enqueue(async () => {
+            // A resize can briefly repaint an otherwise idle prompt (A ... B).
+            // This is not remote program ownership: do not leak a draft through
+            // the gap before the fresh prompt has settled.
+            if (this.integration.mode.value === 'agent' && this.integration.state.value === 'prompt' &&
+                !this.integration.ready && !this.handedOff && !this.runtime.locked) {
+                await this.integration.waitForPrompt()
             }
-        }
-        const characters = [...this.decoder.write(data)]
-        for (let index = 0; index < characters.length; index++) {
-            const character = characters[index]
-            const action = this.processCharacter(character)
-            output += action.output ?? ''
-            if (action.aiInput !== undefined) {
-                // Without bracketed-paste mode, xterm can deliver an entire
-                // multiline clipboard payload in one chunk. Once its first
-                // line is recognized as an AI request, the remaining lines
-                // must join that request instead of falling through to Bash.
-                const trailingInput = this.normalizeTrailingAIInput(characters.slice(index + 1).join(''))
-                flush()
-                this.ignoreNextLineFeed = false
-                this.escapeSequence = ''
-                this.bracketedPaste = false
-                this.bracketedPasteContent = ''
-                this.queueAIRequest(trailingInput ? `${action.aiInput}\n${trailingInput}` : action.aiInput)
+            // A preceding queued Enter may have started an Agent run since receipt.
+            if (this.runtime.locked && this.integration.mode.value === 'agent' && !this.integration.alternateScreen) {
+                if (input === '\x03') { this.runtime.stopAgent?.() } else { this.onBlockedInput() }
                 return
             }
-        }
-        flush()
-    }
-
-    forceAI (): void {
-        if (this.runtime.locked) {
-            this.onBlockedInput()
-            return
-        }
-        const action = this.submit(true)
-        if (action.output) {
-            this.sendAgent(action.output)
-        }
-        if (action.aiInput !== undefined) {
-            this.queueAIRequest(action.aiInput)
-        }
-    }
-
-    sendAgent (data: string|Buffer): void {
-        this.outputToSession.next(Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8'))
-    }
-
-    resetInputBuffer (): void {
-        this.resetBuffer()
-        this.escapeSequence = ''
-        this.bracketedPaste = false
-        this.bracketedPasteContent = ''
-        this.bracketedPasteStartedWithInput = false
-        this.ignoreNextLineFeed = false
-    }
-
-    close (): void {
-        if (this.pendingAIStartTimer) {
-            clearTimeout(this.pendingAIStartTimer)
-        }
-        this.decoder.end()
-        this.sessionDecoder.end()
-        super.close()
-    }
-
-    private submit (forceAI: boolean): TerminalInputAction {
-        const input = this.buffer.join('').trim()
-        this.buffer = []
-        this.cursor = 0
-        const reliable = this.bufferReliable
-        this.bufferReliable = true
-        if (!input) {
-            return { output: '\r' }
-        }
-        if (!forceAI && this.interactiveInputExpected) {
-            this.interactiveInputExpected = false
-            void this.sessions.append(this.runtime, 'ssh-input', {
-                content: '[INTERACTIVE_INPUT_SENT_DIRECTLY_TO_PROGRAM]',
-                source: 'user',
-            })
-            return { output: '\r' }
-        }
-        if (!forceAI && (!reliable || this.detector.isShellCommand(input))) {
-            if (reliable) {
-                void this.sessions.append(this.runtime, 'ssh-input', { content: input, source: 'user' })
+            if (this.canCapture && !this.escape && !this.paste && /^[^\x00-\x1f\x7f-\x9f]+$/.test(input)) {
+                await this.runtime.tab.write('')
+                this.captureAnchor()
+                this.buffer += input
+                await this.paint()
+                return
             }
-            return { output: '\r' }
-        }
-
-        // The line has already been echoed by the remote readline implementation.
-        // Ctrl+U removes it without submitting it to the shell.
-        return { output: '\x15', aiInput: input }
-    }
-
-    private processCharacter (character: string): TerminalInputAction {
-        if (this.escapeSequence) {
-            this.escapeSequence += character
-            if (this.isCompleteEscapeSequence(this.escapeSequence)) {
-                const sequence = this.escapeSequence
-                this.escapeSequence = ''
-                if (sequence === '\x1b[200~') {
-                    this.bracketedPaste = true
-                    this.bracketedPasteContent = ''
-                    this.bracketedPasteStartedWithInput = this.buffer.length > 0
-                    return {}
-                }
-                if (this.bracketedPaste) {
-                    if (sequence === '\x1b[201~') {
-                        return this.finishBracketedPaste()
-                    }
-                    this.bracketedPasteContent += sequence
-                    return {}
-                }
-                this.handleEscapeSequence(sequence)
-                return { output: sequence }
-            } else if (this.escapeSequence.length > 32) {
-                this.bufferReliable = false
-                const sequence = this.escapeSequence
-                this.escapeSequence = ''
-                return { output: sequence }
+            if (!this.canCapture && !this.buffer) {
+                this.sendAgent(input)
+                if (/[\r\n]/.test(input)) { this.integration.commandStarted() }
+                return
             }
-            return {}
-        }
-        if (character === '\x1b') {
-            this.escapeSequence = character
-            return {}
-        }
-        if (this.bracketedPaste) {
-            this.bracketedPasteContent += character
-            return {}
-        }
-        if (character === '\n' && this.ignoreNextLineFeed) {
-            this.ignoreNextLineFeed = false
-            return {}
-        }
-        this.ignoreNextLineFeed = false
-        if (character === '\r' || character === '\n') {
-            this.ignoreNextLineFeed = character === '\r'
-            return this.submit(false)
-        }
-        if (character === '\x03') {
-            this.resetBuffer()
-            return { output: character }
-        }
-        if (character === '\x01') {
-            this.cursor = 0
-            return { output: character }
-        }
-        if (character === '\x05') {
-            this.cursor = this.buffer.length
-            return { output: character }
-        }
-        if (character === '\x0b') {
-            this.buffer.splice(this.cursor)
-            return { output: character }
-        }
-        if (character === '\x15') {
-            this.buffer.splice(0, this.cursor)
-            this.cursor = 0
-            if (!this.buffer.length) {
-                this.bufferReliable = true
+            for (const character of input) {
+                await this.character(character)
             }
-            return { output: character }
-        }
-        if (character === '\x17') {
-            this.deletePreviousWord()
-            return { output: character }
-        }
-        if (character === '\x08' || character === '\x7f') {
-            if (this.cursor > 0) {
-                this.buffer.splice(--this.cursor, 1)
-            }
-            return { output: character }
-        }
-        if (character.codePointAt(0)! < 32) {
-            this.bufferReliable = false
-            return { output: character }
-        }
-        this.insert(character)
-        return { output: character }
+        })
     }
 
-    private insert (value: string): void {
-        const characters = [...value]
-        this.buffer.splice(this.cursor, 0, ...characters)
-        this.cursor += characters.length
+    submit (route: InputRoute = 'auto'): void {
+        this.enqueue(() => this.submitNow(route))
     }
 
-    private deletePreviousWord (): void {
-        while (this.cursor > 0 && /\s/.test(this.buffer[this.cursor - 1])) {
-            this.buffer.splice(--this.cursor, 1)
-        }
-        while (this.cursor > 0 && !/\s/.test(this.buffer[this.cursor - 1])) {
-            this.buffer.splice(--this.cursor, 1)
-        }
-    }
+    forceAI (): void { this.submit('agent') }
 
-    private resetBuffer (): void {
-        this.buffer = []
-        this.cursor = 0
-        this.bufferReliable = true
-    }
-
-    private finishBracketedPaste (): TerminalInputAction {
-        const content = this.bracketedPasteContent
-        const startedWithInput = this.bracketedPasteStartedWithInput
-        this.bracketedPaste = false
-        this.bracketedPasteContent = ''
-        this.bracketedPasteStartedWithInput = false
-
-        const normalized = content.replace(/\r\n?/g, '\n')
-        this.insert(normalized)
-        const input = this.buffer.join('').trim()
-        if (normalized.includes('\n') && input && !this.detector.isShellCommand(input)) {
-            this.resetBuffer()
-            // Nothing from this paste reached the PTY. Only clear text that
-            // was already typed before the paste; an empty prompt needs no
-            // remote editing sequence at all.
-            return {
-                output: startedWithInput ? '\x15' : undefined,
-                aiInput: input,
-            }
-        }
-
-        return { output: `\x1b[200~${content}\x1b[201~` }
-    }
-
-    private normalizeTrailingAIInput (value: string): string {
-        return value
-            .replace(/\x1b\[20[01]~/g, '')
-            .replace(/\r\n?/g, '\n')
-            .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
-            .trim()
-    }
-
-    private queueAIRequest (input: string): void {
-        this.pendingAIInput = input
-        if (this.pendingAIStartTimer) {
-            clearTimeout(this.pendingAIStartTimer)
-        }
-        // Ctrl+U is processed by the remote readline implementation. Wait for
-        // its prompt redraw before reserving xterm rows, otherwise that redraw
-        // races the local AI decoration and leaves duplicated input below it.
-        this.pendingAIStartTimer = setTimeout(() => this.startPendingAIRequest(), 1000)
-    }
-
-    private startPendingAIRequest (): void {
-        const input = this.pendingAIInput
-        if (!input) {
-            return
-        }
-        this.pendingAIInput = undefined
-        if (this.pendingAIStartTimer) {
-            clearTimeout(this.pendingAIStartTimer)
-            this.pendingAIStartTimer = undefined
-        }
-        setTimeout(() => this.onAIRequest(input))
-    }
-
-    private isCompleteEscapeSequence (sequence: string): boolean {
-        if (sequence.length < 2) {
-            return false
-        }
-        if (sequence[1] === '[') {
-            if (sequence.length < 3) {
-                return false
-            }
-            const last = sequence[sequence.length - 1]
-            return last >= '@' && last <= '~'
-        }
-        if (sequence[1] === 'O') {
-            return sequence.length >= 3
-        }
+    pasteText (text: string): boolean {
+        if (!this.canCapture) { return false }
+        this.enqueue(async () => {
+            if (!this.canCapture) { this.onBlockedInput(); return }
+            await this.runtime.tab.write('')
+            this.captureAnchor()
+            this.buffer += text.replace(/\r\n?/g, '\n').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '')
+            await this.paint()
+        })
         return true
     }
 
-    private handleEscapeSequence (sequence: string): void {
-        if (['\x1b[D', '\x1bOD'].includes(sequence)) {
-            this.cursor = Math.max(0, this.cursor - 1)
-            return
+    sendAgent (data: string|Buffer): void {
+        if (!this.closed) {
+            this.outputToSession.next(Buffer.isBuffer(data) ? data : Buffer.from(data, 'utf8'))
         }
-        if (['\x1b[C', '\x1bOC'].includes(sequence)) {
-            this.cursor = Math.min(this.buffer.length, this.cursor + 1)
-            return
+    }
+
+    resetInputBuffer (): void {
+        this.buffer = ''
+        this.escape = ''
+        this.paste = false
+        this.pasteContent = ''
+        this.anchor?.dispose()
+        this.anchor = undefined
+    }
+
+    async handoff (): Promise<void> {
+        await this.queue
+        if (this.buffer) {
+            await this.erase()
+            this.sendAgent(this.remoteText(this.buffer))
+            this.resetInputBuffer()
         }
-        if (['\x1b[H', '\x1bOH', '\x1b[1~', '\x1b[7~'].includes(sequence)) {
-            this.cursor = 0
-            return
-        }
-        if (['\x1b[F', '\x1bOF', '\x1b[4~', '\x1b[8~'].includes(sequence)) {
-            this.cursor = this.buffer.length
-            return
-        }
-        if (sequence === '\x1b[3~') {
-            if (this.cursor < this.buffer.length) {
-                this.buffer.splice(this.cursor, 1)
+        this.handedOff = true
+    }
+
+    async settled (): Promise<void> { await this.queue }
+
+    close (): void {
+        this.closed = true
+        this.resetInputBuffer()
+        this.decoder.end()
+        super.close()
+    }
+
+    private enqueue (operation: () => Promise<void>): void {
+        this.queue = this.queue.then(async () => {
+            if (!this.closed) { await operation() }
+        }).catch(error => {
+            this.integration.notice.next('输入同步失败，输入未提交：' + String(error))
+        })
+    }
+
+    private async character (character: string): Promise<void> {
+        if (this.escape) {
+            this.escape += character
+            if (!/^\x1b(?:\[[0-?]*[ -/]*[@-~]|O.|[^\[O])$/.test(this.escape) && this.escape.length < 64) { return }
+            const sequence = this.escape
+            this.escape = ''
+            if (sequence === '\x1b[200~') {
+                this.paste = true
+                this.pasteContent = ''
+            } else if (sequence === '\x1b[201~' && this.paste) {
+                this.paste = false
+                this.captureAnchor()
+                this.buffer += this.pasteContent.replace(/\r\n?/g, '\n')
+                this.pasteContent = ''
+                await this.paint()
+            } else if (!this.paste) {
+                await this.giveToReadline(sequence)
             }
             return
         }
-        // History navigation, completion and unknown terminal sequences can
-        // replace the remote readline buffer with text we cannot observe.
-        this.bufferReliable = false
+        if (character === '\x1b') { this.escape = character; return }
+        if (this.paste) {
+            if (character === '\r' || character === '\n' || character === '\t' || character.codePointAt(0)! >= 32) {
+                this.pasteContent += character
+            }
+            return
+        }
+        if (!this.canCapture) {
+            if (!this.runtime.locked) {
+                this.sendAgent(character)
+                if (character === '\r' || character === '\n') { this.integration.commandStarted() }
+            }
+            return
+        }
+        if (character === '\r' || character === '\n') {
+            await this.submitNow('auto')
+        } else if (character === '\x03') {
+            await this.erase()
+            this.resetInputBuffer()
+            this.integration.commandStarted()
+            this.sendAgent(character)
+        } else if (character === '\x7f' || character === '\x08') {
+            const characters = [...this.buffer]
+            characters.pop()
+            this.buffer = characters.join('')
+            await this.paint()
+        } else if (character === '\x15') {
+            this.buffer = ''
+            await this.paint()
+        } else if (character === '\x17') {
+            this.buffer = this.buffer.replace(/\s*\S+\s*$/, '')
+            await this.paint()
+        } else if (character.codePointAt(0)! < 32) {
+            await this.giveToReadline(character)
+        } else {
+            this.captureAnchor()
+            this.buffer += character
+            await this.paint()
+        }
+    }
+
+    private async submitNow (route: InputRoute): Promise<void> {
+        if (!this.canCapture) { this.onBlockedInput(); return }
+        const input = this.buffer
+        const shell = route === 'shell' || !input.trim() || route === 'auto' && this.detector.isShellCommand(input, this.integration.kind ?? undefined)
+        if (shell) {
+            await this.erase()
+            this.resetInputBuffer()
+            this.integration.commandStarted()
+            void this.sessions.append(this.runtime, 'ssh-input', { content: input, source: 'user' })
+            this.sendAgent(this.remoteText(route === 'auto' ? unwrapShellFence(input) : input) + '\r')
+        } else {
+            this.resetInputBuffer()
+            this.runtime.locked = true
+            await this.runtime.tab.write('\r\n')
+            this.onAIRequest(input)
+        }
+    }
+
+    private remoteText (input: string): string {
+        return input.includes('\n') && this.runtime.tab.frontend?.supportsBracketedPaste()
+            ? '\x1b[200~' + input + '\x1b[201~' : input
+    }
+
+    private async giveToReadline (key: string): Promise<void> {
+        await this.erase()
+        const input = this.buffer
+        this.resetInputBuffer()
+        this.handedOff = true
+        this.integration.notice.next('Shell 已接管本轮输入；新的提示符出现后恢复自动识别')
+        this.sendAgent(this.remoteText(input) + key)
+    }
+
+    private captureAnchor (): void {
+        if (this.anchor) { return }
+        const frontend = this.runtime.tab.frontend
+        if (frontend instanceof XTermFrontend) {
+            this.anchor = frontend.xterm.registerMarker(0)
+            this.anchorColumn = frontend.xterm.buffer.active.cursorX
+            this.anchorColumns = frontend.xterm.cols
+            let line = this.anchor?.line ?? 0
+            let wrapped = 0
+            while (line > 0 && frontend.xterm.buffer.active.getLine(line)?.isWrapped) {
+                wrapped++
+                line--
+            }
+            this.promptCellOffset = wrapped * this.anchorColumns + this.anchorColumn
+        }
+    }
+
+    private async erase (): Promise<void> {
+        const frontend = this.runtime.tab.frontend
+        if (!(frontend instanceof XTermFrontend) || !this.anchor || this.anchor.isDisposed) { return }
+        await this.runtime.tab.write('')
+        const buffer = frontend.xterm.buffer.active
+        let row = this.anchor.line - buffer.baseY
+        if (this.anchorColumns !== frontend.xterm.cols) {
+            let start = this.anchor.line
+            while (start > 0 && buffer.getLine(start)?.isWrapped) { start-- }
+            row = start + Math.floor(this.promptCellOffset / frontend.xterm.cols) - buffer.baseY
+            this.anchorColumn = this.promptCellOffset % frontend.xterm.cols
+        }
+        if (row < 0) {
+            await this.runtime.tab.write('\r\n' + this.integration.promptText)
+            this.anchor.dispose()
+            this.anchor = undefined
+            this.captureAnchor()
+            return
+        }
+        await this.runtime.tab.write('\x1b[' + (row + 1) + ';' + (this.anchorColumn + 1) + 'H\x1b[J')
+    }
+
+    private async paint (): Promise<void> {
+        await this.erase()
+        await this.runtime.tab.write(terminalText(this.buffer))
     }
 }

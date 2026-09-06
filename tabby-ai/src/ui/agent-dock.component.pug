@@ -1,0 +1,23 @@
+.agent-controls((keydown)='$event.stopPropagation()', (keyup)='$event.stopPropagation()', (mousedown)='$event.stopPropagation()', (click)='$event.stopPropagation()')
+    .mode-bar
+        button.btn.btn-sm.btn-link.mode-button(type='button', (click)='toggleMode()', [attr.aria-pressed]='runtime.terminal.value.mode === "agent"') {{ runtime.terminal.value.mode === 'agent' ? 'Agent 模式' : '原本模式' }}
+        ng-container(*ngIf='runtime.terminal.value.mode === "agent"')
+            button.btn.btn-sm.btn-link(type='button', [disabled]='!runtime.terminal.value.ready', (click)='terminal.submit(runtime, "shell")', title='跳过识别，发送当前完整输入') 发送到 Shell
+            button.btn.btn-sm.btn-link(type='button', [disabled]='!runtime.terminal.value.ready', (click)='terminal.submit(runtime, "agent")', title='跳过识别，发送当前完整输入') 发送给 Agent
+        span.agent-status(*ngIf='runtime.activeRunId && runtime.terminal.value.mode === "agent"') {{ statusLabel }}
+        button.btn.btn-sm.btn-link.stop-button(*ngIf='runtime.activeRunId && runtime.terminal.value.mode === "agent"', type='button', (click)='runtime.stopAgent?.()') 停止 Agent
+    .notice(*ngIf='runtime.terminal.value.notice', role='status') {{ runtime.terminal.value.notice }}
+    .interaction-area(*ngIf='requests.length || forms.length')
+        .interaction(*ngFor='let request of requests')
+            .request-reason {{ request.reason }}
+            label([attr.for]='request.id') {{ request.risk === 'DANGEROUS' ? '危险命令 · 需要二次确认' : '命令审批' }}
+            textarea.form-control([id]='request.id', rows='3', [ngModel]='commands.get(request.id)', (ngModelChange)='edit(request, $event)', spellcheck='false')
+            .actions
+                button.btn.btn-sm.btn-secondary(type='button', (click)='reject(request)') 拒绝
+                button.btn.btn-sm([class.btn-danger]='confirmed.has(request.id)', [class.btn-primary]='!confirmed.has(request.id)', type='button', (click)='approve(request)') {{ confirmed.has(request.id) ? '确认执行危险命令' : '允许执行' }}
+        .interaction(*ngFor='let form of forms')
+            label([attr.for]='form.id') {{ form.prompt }}
+            input.form-control([id]='form.id', [type]='form.kind === "password" ? "password" : "text"', [ngModel]='values.get(form.id)', (ngModelChange)='values.set(form.id, $event)', (keydown.enter)='submitForm(form); $event.preventDefault()', autocomplete='off', spellcheck='false')
+            .actions
+                button.btn.btn-sm.btn-secondary(type='button', (click)='submitForm(form, false)') 取消
+                button.btn.btn-sm.btn-primary(type='button', (click)='submitForm(form)') 提交

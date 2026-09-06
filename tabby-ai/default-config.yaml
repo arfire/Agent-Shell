@@ -13,6 +13,8 @@ agent:
   recentOutputLines: 5000
 
 inputDetection:
+  forceAgentShortcut: Shift+Enter
+  forceShellShortcut: Ctrl+Enter
   shellCommands:
     - alias
     - awk

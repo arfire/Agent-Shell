@@ -26,6 +26,34 @@ export class SecretRedactionScope {
         return this.redactor.redact(this.replaceKnown(content))
     }
 
+    /** Keep a possible secret prefix until the next transport chunk arrives. */
+    streamFilter (): ((content: string) => string) & { flush: () => string } {
+        let pending = ''
+        const filter = (content: string): string => {
+            pending += content
+            let retained = 0
+            for (const value of this.values.values()) {
+                for (let length = Math.min(value.length - 1, pending.length); length > retained; length--) {
+                    if (pending.endsWith(value.slice(0, length))) { retained = length; break }
+                }
+            }
+            let cutoff = pending.length - retained
+            for (const value of this.values.values()) {
+                const start = pending.lastIndexOf(value, cutoff - 1)
+                if (start >= 0 && start < cutoff && start + value.length > cutoff) { cutoff = start }
+            }
+            const visible = this.redactKnown(pending.slice(0, cutoff))
+            pending = pending.slice(cutoff)
+            return visible
+        }
+        filter.flush = (): string => {
+            const visible = this.redactKnown(pending)
+            pending = ''
+            return visible
+        }
+        return filter
+    }
+
     private replaceKnown (content: string): string {
         let result = content
         for (const [placeholder, value] of this.values) {
@@ -43,6 +71,7 @@ export class SecretRedactionScope {
     }
 
     register (value: string): string {
+        if (!value) { return '' }
         for (const [placeholder, registered] of this.values) {
             if (registered === value) {
                 return placeholder

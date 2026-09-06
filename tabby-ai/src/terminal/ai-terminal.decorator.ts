@@ -7,8 +7,9 @@ import { AgentService } from '../agent/agent.service'
 import { AIInputMiddleware } from './ai-input.middleware'
 import { AISessionCaptureMiddleware } from './session-capture.middleware'
 import { TerminalControllerService } from './terminal-controller.service'
-import { InlineBlockService } from '../ui/inline-block.service'
+import { AgentTerminalPresenter } from '../terminal/agent-terminal-presenter'
 import { SecretRedactor } from '../policy/secret-redactor'
+import { AgentDockService } from '../ui/agent-dock.service'
 
 @Injectable()
 export class AITerminalDecorator extends TerminalDecorator {
@@ -17,9 +18,10 @@ export class AITerminalDecorator extends TerminalDecorator {
     constructor (
         private sessions: AISessionService,
         private controller: TerminalControllerService,
-        private blocks: InlineBlockService,
+        private presenter: AgentTerminalPresenter,
         private agent: AgentService,
         private redactor: SecretRedactor,
+        private dock: AgentDockService,
     ) {
         super()
     }
@@ -38,7 +40,9 @@ export class AITerminalDecorator extends TerminalDecorator {
         if (terminal instanceof SSHTabComponent) {
             const runtime = this.sessions.get(terminal)
             if (runtime) {
-                this.blocks.detachSession(runtime.id)
+                runtime.stopAgent?.()
+                this.dock.detach(runtime.id)
+                this.presenter.detachSession(runtime.id)
             }
             this.controller.detach(terminal)
             this.sessions.detach(terminal)
@@ -48,6 +52,7 @@ export class AITerminalDecorator extends TerminalDecorator {
 
     private async attachRuntime (tab: SSHTabComponent): Promise<void> {
         const runtime = await this.sessions.attach(tab)
+        this.dock.attach(runtime)
         await this.attachMiddleware(tab)
         await this.controller.attach(tab, runtime, this.getRequestHandler(runtime))
         // JSONL history remains available to the context builder. Recreating

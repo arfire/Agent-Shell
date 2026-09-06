@@ -9,7 +9,7 @@ import { AISessionRuntime, AISessionService } from '../session/ai-session.servic
 import { AIInputMiddleware } from '../terminal/ai-input.middleware'
 import { TerminalControllerService } from '../terminal/terminal-controller.service'
 import { InteractivePromptKind } from '../terminal/command-framing.middleware'
-import { InlineBlockService } from '../ui/inline-block.service'
+import { AgentTerminalPresenter } from '../terminal/agent-terminal-presenter'
 import { AgentContextBuilder } from './context-builder'
 import { AgentInteractionService } from './interaction.service'
 import { AgentRunQueue } from './run-queue'
@@ -18,11 +18,11 @@ const TERMINAL_TOOLS: ChatTool[] = [{
     type: 'function',
     'function': {
         name: 'terminal_exec',
-        description: 'Execute one Linux shell command step in the current SSH session and return its output and exit code.',
+        description: 'Execute one command step using the current SSH shell syntax and return its output and exit code.',
         parameters: {
             type: 'object',
             properties: {
-                command: { type: 'string', description: 'A Linux shell command. Format long combined commands over multiple lines with readable indentation and shell-safe continuations.' },
+                command: { type: 'string', description: 'A command for the current shell. Format long combined commands over multiple lines with readable indentation and shell-safe continuations.' },
                 reason: { type: 'string', description: 'A concise user-facing reason for running this command.' },
             },
             required: ['command', 'reason'],
@@ -52,6 +52,7 @@ interface ActiveRun {
     stopRequested: boolean
     goal: string
     sensitive: SecretRedactionScope
+    session: AISessionRuntime['tab']['session']
 }
 
 class UserRejectedError extends Error { }
@@ -79,7 +80,7 @@ export class AgentService {
         private interactions: AgentInteractionService,
         private queue: AgentRunQueue,
         private terminal: TerminalControllerService,
-        private blocks: InlineBlockService,
+        private presenter: AgentTerminalPresenter,
     ) { }
 
     async start (runtime: AISessionRuntime, input: string, inputMiddleware: AIInputMiddleware): Promise<void> {
@@ -92,9 +93,25 @@ export class AgentService {
             stopRequested: false,
             goal: input,
             sensitive: this.redactor.createScope(),
+            session: runtime.tab.session,
         }
+        let complete = (): void => { /* Set by the Promise executor below. */ }
+        const completed = new Promise<void>(resolve => { complete = resolve })
         const protectedInput = run.sensitive.protect(input)
         runtime.activeRunId = run.id
+        runtime.stopAgent = () => this.stop(runtime)
+        runtime.handoffAgent = async () => {
+            run.stopRequested = true
+            // Drain any final model batch while the prompt is still ours. Command
+            // execution already interrupts the presenter before sending its wrapper.
+            await this.presenter.interrupt(run.id)
+            this.terminal.releaseControl(runtime)
+            this.interactions.cancelRun(run.id)
+            if (!this.terminal.isExecuting(runtime)) {
+                run.controller.abort(new DOMException('Terminal handed to user', 'AbortError'))
+                await completed
+            }
+        }
         runtime.locked = true
         runtime.state.next('QUEUED')
         this.activeRuns.set(runtime.id, run)
@@ -103,7 +120,7 @@ export class AgentService {
         try {
             await this.sessions.append(runtime, 'user-ai-input', { content: protectedInput }, run.id)
             await this.sessions.append(runtime, 'agent-state', { state: 'QUEUED' }, run.id)
-            await this.blocks.open(runtime, run.id, () => this.stop(runtime))
+            await this.presenter.open(runtime, run.id, () => this.stop(runtime))
             await this.config.ready
             release = await this.queue.acquire(run.controller.signal)
             runtime.state.next('THINKING')
@@ -123,19 +140,29 @@ export class AgentService {
                 ? { state, reason: getErrorMessage(error) }
                 : { message: getErrorMessage(error) }, run.id)
         } finally {
-            await this.blocks.finish(run.id)
+            try {
+                await this.presenter.finish(run.id)
+                if (runtime.tab.session === run.session) {
+                    await this.terminal.restorePrompt(runtime)
+                }
+            } catch (error) {
+                runtime.terminal.next({ ...runtime.terminal.value, notice: `提示符恢复失败：${getErrorMessage(error)}` })
+            }
             release?.()
             this.interactions.cancelRun(run.id)
             this.activeRuns.delete(runtime.id)
             runtime.activeRunId = undefined
+            runtime.stopAgent = undefined
+            runtime.handoffAgent = undefined
             runtime.liveText.next('')
             // Reset the shadow readline state and enqueue the fresh prompt
             // before accepting another xterm/IME commit. Otherwise a very
             // quick next input can race the previous run's cleanup.
             inputMiddleware.resetInputBuffer()
-            inputMiddleware.sendAgent('\r')
             runtime.locked = false
+            runtime.terminal.next({ ...runtime.terminal.value, ready: inputMiddleware.canCapture })
             runtime.tab.frontend?.focus()
+            complete()
         }
     }
 
@@ -162,9 +189,11 @@ export class AgentService {
             }
             runtime.state.next('THINKING')
             runtime.liveText.next('')
+            const textFilter = run.sensitive.streamFilter()
             const result = await this.client.stream(messages, TERMINAL_TOOLS, {
-                onText: text => runtime.liveText.next(runtime.liveText.value + text),
+                onText: text => runtime.liveText.next(runtime.liveText.value + textFilter(text)),
             }, run.controller.signal)
+            runtime.liveText.next(runtime.liveText.value + textFilter.flush())
             if (result.content) {
                 await this.sessions.append(runtime, 'ai-message', { content: result.content }, run.id)
             }
@@ -207,7 +236,7 @@ export class AgentService {
         }
         let command = run.sensitive.protect(argumentsValue.command.trim())
         const reason = run.sensitive.protect(argumentsValue.reason.trim())
-        let decision = this.policy.evaluate(command)
+        let decision = this.policy.evaluate(command, runtime.shellKind)
         await this.sessions.append(runtime, 'ai-command', { command, reason, risk: decision.risk }, run.id)
 
         if (decision.risk === 'DENY') {
@@ -234,7 +263,7 @@ export class AgentService {
             }
             const originalDecision = decision
             command = protectedEditedCommand
-            decision = this.policy.evaluate(command)
+            decision = this.policy.evaluate(command, runtime.shellKind)
             if (isHigherRisk(decision, originalDecision)) {
                 return this.executeReclassifiedCommand(runtime, run, command, reason, decision)
             }
@@ -272,7 +301,7 @@ export class AgentService {
         if (!response.approved) {
             throw new UserRejectedError('User rejected the reclassified command')
         }
-        const finalDecision = this.policy.evaluate(protectedEditedCommand)
+        const finalDecision = this.policy.evaluate(protectedEditedCommand, runtime.shellKind)
         if (isHigherRisk(finalDecision, decision)) {
             return this.executeReclassifiedCommand(runtime, run, protectedEditedCommand, reason, finalDecision)
         }
@@ -286,17 +315,21 @@ export class AgentService {
         reason: string,
         decision: CommandPolicyDecision,
     ): Promise<string> {
+        if (this.isStopped(run)) {
+            throw new DOMException('Agent stopped before command execution', 'AbortError')
+        }
         if (decision.risk === 'DENY') {
             return JSON.stringify({ error: 'Command denied by local policy', reason: decision.reason })
         }
         runtime.state.next('EXECUTING')
         await this.sessions.append(runtime, 'ssh-input', { content: command, source: 'ai', reason }, run.id)
-        await this.blocks.interrupt(run.id)
+        await this.presenter.interrupt(run.id)
         try {
             const executableCommand = run.sensitive.restore(command)
             const result = await this.terminal.execute(runtime, executableCommand, (prompt, kind) =>
                 this.handleInteractivePrompt(runtime, run, prompt, kind), run.controller.signal,
-            content => run.sensitive.redactKnown(content))
+            run.sensitive.streamFilter())
+            await this.sessions.append(runtime, 'command-result', { exitCode: result.exitCode, handedOff: run.stopRequested }, run.id)
             runtime.state.next('OBSERVING')
             if (run.stopRequested) {
                 throw new DOMException('Agent stopped after command completion', 'AbortError')
@@ -304,7 +337,7 @@ export class AgentService {
             return JSON.stringify({ exitCode: result.exitCode, output: result.output })
         } finally {
             if (!run.stopRequested && !run.controller.signal.aborted) {
-                await this.blocks.open(runtime, run.id, () => this.stop(runtime), this.nextEventSeq(runtime))
+                await this.presenter.open(runtime, run.id, () => this.stop(runtime), this.nextEventSeq(runtime))
             }
         }
     }
@@ -375,7 +408,7 @@ export class AgentService {
             }
         }
         if (value === null) {
-            await this.blocks.open(runtime, run.id, () => this.stop(runtime), this.nextEventSeq(runtime))
+            await this.presenter.open(runtime, run.id, () => this.stop(runtime), this.nextEventSeq(runtime))
             try {
                 const form = await this.interactions.requestForm({
                     sessionId: runtime.id,
@@ -390,7 +423,7 @@ export class AgentService {
                     }
                 }
             } finally {
-                await this.blocks.interrupt(run.id)
+                await this.presenter.interrupt(run.id)
             }
         }
         if (value !== null) {
@@ -407,6 +440,10 @@ export class AgentService {
     private nextEventSeq (runtime: AISessionRuntime): number {
         const events = runtime.events.value
         return events.length ? events[events.length - 1].seq + 1 : 0
+    }
+
+    private isStopped (run: ActiveRun): boolean {
+        return run.stopRequested || run.controller.signal.aborted
     }
 
     private async preserveLiveText (runtime: AISessionRuntime, run: ActiveRun): Promise<void> {

@@ -1,4 +1,4 @@
-import { Observable, Subject } from 'rxjs'
+import { Observable, ReplaySubject, Subject } from 'rxjs'
 import stripAnsi from 'strip-ansi'
 import { Injector } from '@angular/core'
 import { LogService } from 'tabby-core'
@@ -9,10 +9,13 @@ import * as russh from 'russh'
 
 
 export class SSHShellSession extends BaseSession {
+    /** Shell channel and its output subscriptions are ready for auxiliary operations. */
+    readonly ready$ = new ReplaySubject<void>(1)
     shell?: russh.Channel
     get serviceMessage$ (): Observable<string> { return this.serviceMessage }
     private serviceMessage = new Subject<string>()
     private ssh: SSHSession|null
+    private closing = false
 
     constructor (
         injector: Injector,
@@ -63,6 +66,8 @@ export class SSHShellSession extends BaseSession {
                 this.destroy()
             }
         })
+        this.ready$.next()
+        this.ready$.complete()
     }
 
     emitServiceMessage (msg: string): void {
@@ -90,12 +95,22 @@ export class SSHShellSession extends BaseSession {
     }
 
     async destroy (): Promise<void> {
+        if (this.closing) { return }
+        this.closing = true
         this.logger.debug('Closing shell')
         this.serviceMessage.complete()
-        this.kill()
-        this.ssh?.unref()
+        const ssh = this.ssh
         this.ssh = null
-        await super.destroy()
+        try {
+            // Closing this tab also closes its shell on a reused SSH connection.
+            // Session-only prompt hooks disappear with that shell process.
+            await this.shell?.close()
+        } catch (error) {
+            this.logger.debug('Shell channel was already closed', error)
+        } finally {
+            await super.destroy()
+            ssh?.unref()
+        }
     }
 
     async getChildProcesses (): Promise<any[]> {

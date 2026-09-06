@@ -107,6 +107,9 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
 
     frontend?: Frontend
 
+    /** Optional local prompt editor. Return true when the clipboard was consumed locally. */
+    localPasteHandler?: (text: string) => boolean
+
     /** @hidden */
     frontendIsReady = false
 
@@ -541,6 +544,9 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
 
     async paste (): Promise<void> {
         let data = this.platform.readClipboard()
+        if (this.localPasteHandler?.(data)) {
+            return
+        }
         if (this.hostApp.platform === Platform.Windows) {
             data = data.replaceAll('\r\n', '\r')
         } else {

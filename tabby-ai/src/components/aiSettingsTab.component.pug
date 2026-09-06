@@ -68,6 +68,13 @@ ng-container(*ngIf='model')
         input.form-control(type='number', min='1', step='1', [(ngModel)]='model.agent.maxConcurrentRuns', (ngModelChange)='markChanged()')
 
     .d-flex.gap-2
+        .form-line
+            label 强制发送 Agent 快捷键
+            input.form-control(type='text', [(ngModel)]='model.inputDetection.forceAgentShortcut', (ngModelChange)='markChanged()', placeholder='Shift+Enter')
+        .form-line
+            label 强制发送 Shell 快捷键
+            input.form-control(type='text', [(ngModel)]='model.inputDetection.forceShellShortcut', (ngModelChange)='markChanged()', placeholder='Ctrl+Enter')
+    .d-flex.gap-2
         button.btn.btn-outline-primary(
             (click)='testConnection()',
             [disabled]='testing || !model.llm.baseURL || !model.llm.model'

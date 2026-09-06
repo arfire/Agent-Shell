@@ -14,6 +14,15 @@ export interface AISessionRuntime {
     state: BehaviorSubject<string>
     locked: boolean
     activeRunId?: string
+    stopAgent?: () => void
+    handoffAgent?: () => Promise<void>
+    shellKind?: string
+    terminal: BehaviorSubject<{
+        mode: 'agent'|'shell'
+        ready: boolean
+        notice: string
+        state: string
+    }>
 }
 
 @Injectable({ providedIn: 'root' })
@@ -61,6 +70,7 @@ export class AISessionService {
             liveText: new BehaviorSubject(''),
             state: new BehaviorSubject('IDLE'),
             locked: false,
+            terminal: new BehaviorSubject({ mode: 'agent' as const, ready: false, notice: '正在连接 Shell…', state: 'initializing' }),
         }
         this.sessions.set(tab, runtime)
         return runtime
@@ -71,6 +81,7 @@ export class AISessionService {
         runtime?.events.complete()
         runtime?.liveText.complete()
         runtime?.state.complete()
+        runtime?.terminal.complete()
         this.sessions.delete(tab)
     }
 
