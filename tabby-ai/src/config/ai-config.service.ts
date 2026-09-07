@@ -4,6 +4,7 @@ import * as path from 'path'
 import * as yaml from 'js-yaml'
 import * as remote from '@electron/remote'
 import { LogService, Logger } from 'tabby-core'
+import { Subject } from 'rxjs'
 
 import { AIConfig, validateAIConfig } from './config-schema'
 
@@ -13,11 +14,14 @@ export class AIConfigService {
     readonly configPath: string
     readonly defaultConfigPath: string
     readonly ready: Promise<void>
+    readonly changed = new Subject<void>()
 
     config: AIConfig
     loadError: string|null = null
 
     private logger: Logger
+    private defaults: AIConfig
+    private writes = Promise.resolve()
 
     constructor (log: LogService) {
         this.logger = log.create('aiConfig')
@@ -29,15 +33,29 @@ export class AIConfigService {
 
     async save (config: AIConfig): Promise<void> {
         validateAIConfig(config)
-        await fs.promises.mkdir(this.directory, { recursive: true })
-        const temporaryPath = `${this.configPath}.tmp`
-        await fs.promises.writeFile(temporaryPath, yaml.dump(config, { noRefs: true, lineWidth: 120 }), 'utf8')
-        await fs.promises.rename(temporaryPath, this.configPath)
+        const snapshot = JSON.parse(JSON.stringify(config)) as AIConfig
+        const write = this.writes.catch(() => undefined).then(async () => {
+            await fs.promises.mkdir(this.directory, { recursive: true })
+            const temporaryPath = `${this.configPath}.tmp`
+            await fs.promises.writeFile(temporaryPath, yaml.dump(snapshot, { noRefs: true, lineWidth: 120 }), 'utf8')
+            await fs.promises.rename(temporaryPath, this.configPath)
+            this.config = snapshot
+            this.loadError = null
+            this.changed.next()
+        })
+        this.writes = write
+        await write
+    }
+
+    async getDefaults (): Promise<AIConfig> {
+        await this.ready
+        return JSON.parse(JSON.stringify(this.defaults)) as AIConfig
     }
 
     private async initialize (): Promise<void> {
         await fs.promises.mkdir(this.directory, { recursive: true })
         const defaults = await this.loadDefaults()
+        this.defaults = defaults
         let loaded: unknown = defaults
 
         // Keep an untouched, user-visible reference beside the editable file.

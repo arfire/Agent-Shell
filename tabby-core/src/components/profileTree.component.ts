@@ -29,6 +29,8 @@ export class ProfileTreeComponent extends BaseComponent {
 
     filteredProfiles: PartialProfile<Profile>[] = []
     @Input() filter = ''
+    @Input() embedded = false
+    @Input() profileType?: string
 
 
     panelMinWidth = 200
@@ -52,8 +54,8 @@ export class ProfileTreeComponent extends BaseComponent {
     async ngOnInit (): Promise<void> {
         await this.loadTreeItems()
         this.subscribeUntilDestroyed(this.config.changed$, () => this.loadTreeItems())
-        this.app.tabsChanged$.subscribe(() => this.tabStateChanged())
-        this.app.activeTabChange$.subscribe(() => this.tabStateChanged())
+        this.subscribeUntilDestroyed(this.app.tabsChanged$, () => this.tabStateChanged())
+        this.subscribeUntilDestroyed(this.app.activeTabChange$, () => this.tabStateChanged())
     }
 
 
@@ -64,7 +66,7 @@ export class ProfileTreeComponent extends BaseComponent {
         for (const group of groups) {
             if (group.profiles?.length) {
                 // remove template profiles
-                group.profiles = group.profiles.filter(x => !x.isTemplate)
+                group.profiles = group.profiles.filter(x => !x.isTemplate && (!this.profileType || x.type === this.profileType))
 
                 // remove blocklisted profiles
                 group.profiles = group.profiles.filter(x => x.id && !this.config.store.profileBlacklist.includes(x.id))
@@ -72,6 +74,9 @@ export class ProfileTreeComponent extends BaseComponent {
         }
 
         if (!this.config.store.terminal.showBuiltinProfiles) { groups = groups.filter(g => g.id !== 'built-in') }
+        // Synthetic groups without matching servers have no useful content.
+        // Keep empty user groups so they can be populated from the sidebar.
+        if (this.profileType) { groups = groups.filter(g => g.editable === true || (g.profiles?.length ?? 0) > 0) }
 
         groups.sort((a, b) => a.name.localeCompare(b.name))
         groups.sort((a, b) => (a.id === 'built-in' || !a.editable ? 1 : 0) - (b.id === 'built-in' || !b.editable ? 1 : 0))
@@ -102,7 +107,11 @@ export class ProfileTreeComponent extends BaseComponent {
         await this.config.save()
     }
 
-    private async editProfileGroup (group: PartialProfileGroup<CollapsableProfileGroup>): Promise<void> {
+    async newGroup (): Promise<void> {
+        await this.editProfileGroup({ id: 'new', name: '', defaults: {} })
+    }
+
+    async editProfileGroup (group: PartialProfileGroup<CollapsableProfileGroup>): Promise<void> {
         const { EditProfileGroupModalComponent } = window['nodeRequire']('tabby-settings')
 
         const modal = this.ngbModal.open(
@@ -136,7 +145,7 @@ export class ProfileTreeComponent extends BaseComponent {
         )
         const model = group.defaults?.[provider.id] ?? {}
         model.type = provider.id
-        modal.componentInstance.profile = Object.assign({}, model)
+        modal.componentInstance.partialProfile = Object.assign({}, model)
         modal.componentInstance.profileProvider = provider
         modal.componentInstance.defaultsMode = 'group'
 
@@ -171,7 +180,25 @@ export class ProfileTreeComponent extends BaseComponent {
                 click: () => this.editProfile(profile),
                 enabled: !(profile.isBuiltin ?? profile.isTemplate),
             },
+            {
+                type: 'submenu',
+                label: '移动到分组',
+                enabled: !(profile.isBuiltin ?? profile.isTemplate),
+                submenu: [
+                    { label: '未分组', click: () => this.moveProfile(profile) },
+                    ...this.profileGroups.filter(group => group.editable).map(group => ({
+                        label: group.name,
+                        click: () => this.moveProfile(profile, group.id),
+                    })),
+                ],
+            },
         ])
+    }
+
+    async moveProfile (profile: PartialProfile<Profile>, groupId?: string): Promise<void> {
+        if (profile.isBuiltin === true || profile.isTemplate === true) { return }
+        await this.profilesService.writeProfile({ ...profile, group: groupId })
+        await this.config.save()
     }
 
     async groupContextMenu (group: PartialProfileGroup<CollapsableProfileGroup>, event: MouseEvent): Promise<void> {
@@ -214,7 +241,7 @@ export class ProfileTreeComponent extends BaseComponent {
             })
 
             const matches = new FuzzySearch(
-                profiles.filter(p => !p.isTemplate),
+                profiles.filter(p => !p.isTemplate && (!this.profileType || p.type === this.profileType)),
                 ['name', 'description'],
                 { sort: false },
             ).search(q)
@@ -237,7 +264,7 @@ export class ProfileTreeComponent extends BaseComponent {
     startResize (event: MouseEvent): void {
         this.panelIsResizing = true
         this.panelStartX = event.clientX
-        this.panelStartWidth = this.panelWidth
+        this.panelStartWidth = this.panelInternalWidth
         event.preventDefault()
     }
 
@@ -257,12 +284,12 @@ export class ProfileTreeComponent extends BaseComponent {
     }
 
     @HostBinding('style.width.px')
-    get panelWidth (): number {
-        return this.panelInternalWidth
+    get panelWidth (): number|null {
+        return this.embedded ? null : this.panelInternalWidth
     }
 
-    set panelWidth (value: number) {
-        this.panelInternalWidth = value
+    set panelWidth (value: number|null) {
+        if (value !== null) { this.panelInternalWidth = value }
     }
 
     ////// GROUP COLLAPSING //////

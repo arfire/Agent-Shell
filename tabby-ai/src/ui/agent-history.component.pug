@@ -1,0 +1,39 @@
+.p-2
+    .small.text-break.mb-2 {{target || '点击历史会话，连接对应服务器并恢复上下文'}}
+    input.form-control.form-control-sm(placeholder='搜索会话', [(ngModel)]='query', aria-label='搜索 Agent 会话')
+    .d-flex.align-items-center.mt-2
+        label.me-auto
+            input(type='checkbox', [(ngModel)]='allServers')
+            |  全部服务器
+        button.btn.btn-sm.btn-link((click)='refresh()') 刷新
+        button.btn.btn-sm.btn-link((click)='load()', [disabled]='disabled') 新建
+    .small.text-muted(*ngIf='runtime?.activeRunId') 请先停止当前 Agent，再切换会话。
+    .small.text-warning.text-break(*ngIf='notice') {{notice}}
+    .small.text-danger.text-break(*ngIf='error', role='alert') {{error}}
+.history-tree
+    details(*ngFor='let group of groups; trackBy: groupKey', open)
+        summary {{group.name}}
+        .session-row(*ngFor='let entry of group.entries; trackBy: entryKey')
+            button.session((click)='open(entry)', [disabled]='busy', [class.selected]='selected?.id === entry.id')
+                span {{entry.title || '未命名会话'}}
+                small {{entry.updatedAt | date:'MM-dd HH:mm'}}{{runtime?.id === entry.id ? ' · 当前' : ''}}
+            button.btn.btn-sm.btn-link((click)='startRename(entry)', aria-label='重命名会话', title='重命名会话')
+                i.fas.fa-pen
+            button.btn.btn-sm.btn-link((click)='inspect(entry)', aria-label='预览记录', title='预览记录')
+                i.fas.fa-eye
+            .input-group.p-1(*ngIf='renameId === entry.id')
+                input.form-control.form-control-sm([(ngModel)]='renameText', maxlength='80', aria-label='会话名称', (keydown.enter)='rename()', (keydown.escape)='renameId = ""')
+                button.btn.btn-sm.btn-primary((click)='rename()') 保存
+                button.btn.btn-sm.btn-link((click)='renameId = ""') 取消
+    p.p-2.text-muted(*ngIf='!groups.length') 暂无会话记录
+.preview(*ngIf='selected')
+    .d-flex.p-2
+        strong.me-auto 历史预览
+        button.btn.btn-sm.btn-primary((click)='open(selected!)', [disabled]='busy') 打开会话
+    .p-2(*ngIf='linking')
+        label.small 重新关联服务器（后续命令将在所选服务器执行）
+        select.form-control.form-control-sm([(ngModel)]='profileId', aria-label='关联服务器')
+            option(value='') 选择服务器
+            option(*ngFor='let profile of profiles', [value]='profile.id') {{profile.name}}
+        button.btn.btn-sm.btn-primary.mt-1((click)='associate()', [disabled]='!profileId || busy') 关联并打开
+    pre {{preview}}

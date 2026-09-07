@@ -1,0 +1,11 @@
+.sidebar([style.width.px]='collapsed ? 42 : width', [class.mac-inset]='macInset')
+    nav
+        button.btn.btn-sm.btn-link((click)='toggle()', [attr.aria-label]='collapsed ? "展开侧栏" : "收起侧栏"')
+            i.fas([class.fa-chevron-right]='collapsed', [class.fa-chevron-left]='!collapsed')
+        ng-container(*ngIf='!collapsed')
+            button.btn.btn-sm.btn-link([class.active]='selected === "servers"', (click)='select("servers")') 服务器
+            button.btn.btn-sm.btn-link(*ngFor='let provider of providers', [class.active]='selected === provider.id', (click)='select(provider.id)') {{provider.title}}
+    .panels([hidden]='collapsed')
+        profile-tree(*ngIf='selected === "servers"', [embedded]='true', profileType='ssh')
+        ng-template(#panel)
+    .grabber(*ngIf='!collapsed', (mousedown)='startResize($event)')

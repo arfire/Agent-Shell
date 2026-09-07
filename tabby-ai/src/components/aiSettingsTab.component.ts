@@ -1,12 +1,15 @@
 import { Component, HostBinding } from '@angular/core'
 import { ToastrService } from 'ngx-toastr'
-import { HostAppService } from 'tabby-core'
 
-import { AIConfig } from '../config/config-schema'
+import { AIConfig, CommandRisk } from '../config/config-schema'
+import { AgentPermissionsService, approvalAction } from '../policy/agent-permissions.service'
+import { CommandPolicyService } from '../policy/command-policy.service'
+import { AIInputDetector } from '../terminal/input-detector'
 import { AIConfigService } from '../config/ai-config.service'
 import { ChatCompletionsClient } from '../llm/chat-completions.client'
 
 @Component({
+    selector: 'ash-ai-settings',
     templateUrl: './aiSettingsTab.component.pug',
     styleUrls: ['./aiSettingsTab.component.scss'],
 })
@@ -22,7 +25,20 @@ export class AISettingsTabComponent {
     modelListResult: { success: boolean, message: string }|null = null
     availableModels: string[] = []
     modelPickerVisible = false
-    restartRequired = false
+    section = 'model'
+    readonly sections = [
+        { id: 'model', label: '模型连接' }, { id: 'input', label: '命令识别' },
+        { id: 'policy', label: '执行权限' }, { id: 'redaction', label: '敏感信息' },
+    ]
+
+    readonly risks: { value: CommandRisk, label: string }[] = [
+        { value: 'SAFE', label: '安全 · 自动执行' }, { value: 'MODIFY', label: '修改 · 需要审批' },
+        { value: 'DANGEROUS', label: '危险 · 二次确认' }, { value: 'DENY', label: '禁止执行' },
+    ]
+
+    shellCommands = ''
+    previewCommand = ''
+    previewResult = ''
 
     get modelListSize (): number {
         return Math.min(Math.max(this.availableModels.length, 1), 6)
@@ -32,7 +48,9 @@ export class AISettingsTabComponent {
         public configService: AIConfigService,
         private toastr: ToastrService,
         private client: ChatCompletionsClient,
-        private hostApp: HostAppService,
+        public permissions: AgentPermissionsService,
+        private policy: CommandPolicyService,
+        private detector: AIInputDetector,
     ) {
         void this.load()
     }
@@ -84,7 +102,6 @@ export class AISettingsTabComponent {
             return
         }
         this.model.llm.model = modelId
-        this.restartRequired = false
         this.connectionResult = null
     }
 
@@ -94,9 +111,11 @@ export class AISettingsTabComponent {
         }
         this.saving = true
         try {
+            this.syncCommands()
+            if (!await this.permissions.confirmMode(this.model.policy.approvalMode ?? 'configured')) { return }
             await this.configService.save(this.model)
-            this.restartRequired = true
-            this.toastr.success('Restart Ash to apply the new AI configuration.', 'AI configuration saved')
+            this.loadError = null
+            this.toastr.success('已保存，后续请求和命令使用新配置。', 'AI 设置')
         } catch (error) {
             this.toastr.error(String(error), 'Could not save AI configuration')
         } finally {
@@ -105,23 +124,62 @@ export class AISettingsTabComponent {
     }
 
     markChanged (): void {
-        this.restartRequired = false
         this.connectionResult = null
         this.modelListResult = null
         this.availableModels = []
         this.modelPickerVisible = false
     }
 
-    restart (): void {
-        if (!this.restartRequired || this.saving) {
-            return
+    addRule (): void {
+        this.model?.policy.commandRules?.push({ command: '', risk: 'MODIFY' })
+    }
+
+    preview (): void {
+        if (!this.model || !this.previewCommand.trim()) { this.previewResult = ''; return }
+        this.syncCommands()
+        try {
+            const shell = this.detector.isShellCommand(this.previewCommand, undefined, this.model.inputDetection)
+            const decision = this.policy.evaluate(this.previewCommand, undefined, this.model.policy)
+            const action = approvalAction(decision.risk, this.model.policy.approvalMode ?? 'configured')
+            const label = { execute: '自动执行', ask: decision.risk === 'DANGEROUS' ? '二次确认' : '需要审批', deny: '拦截' }[action]
+            this.previewResult = `自动识别：${shell ? 'Shell' : 'Agent'}；若由 Agent 执行：${label}。`
+        } catch (error) { this.previewResult = String(error) }
+    }
+
+    async restoreDefaults (): Promise<void> {
+        if (!this.model) { return }
+        this.syncCommands()
+        const defaults = await this.configService.getDefaults()
+        if (this.section === 'input') { this.model.inputDetection = defaults.inputDetection }
+        if (this.section === 'policy') { this.model.policy = defaults.policy }
+        if (this.section === 'redaction') { this.model.redaction = defaults.redaction }
+        if (this.section === 'model') {
+            this.model.agent = defaults.agent
+            this.model.llm.temperature = defaults.llm.temperature
+            this.model.llm.timeout = defaults.llm.timeout
         }
-        this.hostApp.relaunch()
+        this.prepareModel()
+        this.previewResult = ''
+        this.toastr.info('当前页已恢复默认，点击保存后生效。连接地址、密钥和模型保持不变。')
+    }
+
+    private syncCommands (): void {
+        if (this.model) {
+            this.model.inputDetection.shellCommands = [...new Set(this.shellCommands.split(/\r?\n/).map(x => x.trim()).filter(Boolean))]
+        }
+    }
+
+    private prepareModel (): void {
+        if (!this.model) { return }
+        this.model.policy.approvalMode ??= 'configured'
+        this.model.policy.commandRules ??= []
+        this.shellCommands = this.model.inputDetection.shellCommands.join('\n')
     }
 
     private async load (): Promise<void> {
         await this.configService.ready
         this.model = JSON.parse(JSON.stringify(this.configService.config))
         this.loadError = this.configService.loadError
+        this.prepareModel()
     }
 }

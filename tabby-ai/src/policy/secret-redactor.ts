@@ -94,6 +94,7 @@ export class SecretRedactor {
         }
         let result = content
         for (const rule of config.patterns) {
+            if (rule.enabled === false) { continue }
             const insensitive = rule.pattern.startsWith('(?i)')
             const pattern = insensitive ? rule.pattern.substring(4) : rule.pattern
             result = result.replace(new RegExp(pattern, insensitive ? 'gi' : 'g'), rule.replacement)

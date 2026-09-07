@@ -4,7 +4,8 @@ import { FormsModule } from '@angular/forms'
 import { NgbModule } from '@ng-bootstrap/ng-bootstrap'
 import { ToastrModule } from 'ngx-toastr'
 import { NgxFilesizeModule } from 'ngx-filesize'
-import TabbyCoreModule, { ConfigProvider, TabRecoveryProvider, HotkeyProvider, TabContextMenuItemProvider, ProfileProvider } from 'tabby-core'
+import TabbyCoreModule, { ConfigProvider, TabRecoveryProvider, HotkeyProvider, TabContextMenuItemProvider, ProfileProvider, WorkspacePanelProvider } from 'tabby-core'
+import { WorkspaceFilesComponent, WorkspaceFilesProvider } from './components/workspaceFiles.component'
 import { SettingsTabProvider } from 'tabby-settings'
 import TabbyTerminalModule from 'tabby-terminal'
 
@@ -40,6 +41,7 @@ import { SFTPCreateDirectoryModalComponent } from './components/sftpCreateDirect
         TabbyTerminalModule,
     ],
     providers: [
+        { provide: WorkspacePanelProvider, useClass: WorkspaceFilesProvider, multi: true },
         { provide: ConfigProvider, useClass: SSHConfigProvider, multi: true },
         { provide: SettingsTabProvider, useClass: SSHSettingsTabProvider, multi: true },
         { provide: TabRecoveryProvider, useClass: RecoveryProvider, multi: true },
@@ -49,6 +51,7 @@ import { SFTPCreateDirectoryModalComponent } from './components/sftpCreateDirect
         { provide: SFTPContextMenuItemProvider, useClass: CommonSFTPContextMenu, multi: true },
     ],
     declarations: [
+        WorkspaceFilesComponent,
         SSHProfileSettingsComponent,
         SFTPDeleteModalComponent,
         SFTPCreateDirectoryModalComponent,

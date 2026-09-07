@@ -28,9 +28,13 @@ export class SFTPPanelComponent {
     @Output() pathChange = new EventEmitter<string>()
     pathSegments: PathSegment[] = []
     @Input() cwdDetectionAvailable = false
+    @Input() embedded = false
     editingPath: string|null = null
     showFilter = false
     filterText = ''
+    loadingPath: string|null = null
+    private navigation = 0
+    private destroyed = false
 
     constructor (
         private ngbModal: NgbModal,
@@ -42,18 +46,39 @@ export class SFTPPanelComponent {
     }
 
     async ngOnInit (): Promise<void> {
-        this.sftp = await this.session.openSFTP()
         try {
+            this.sftp = await this.session.openSFTP()
+            if (this.destroyed) { return }
             await this.navigate(this.path)
         } catch (error) {
             console.warn('Could not navigate to', this.path, ':', error)
             this.notifications.error(error.message)
-            await this.navigate('/')
         }
     }
 
+    ngOnDestroy (): void {
+        this.destroyed = true
+        this.navigation++
+    }
+
     async navigate (newPath: string, fallbackOnError = true): Promise<void> {
-        const previousPath = this.path
+        if (!this.navigationAvailable() || this.loadingPath === newPath) { return }
+        const navigation = ++this.navigation
+        this.loadingPath = newPath
+        const hadListing = this.fileList !== null
+        let files: SFTPFile[] = []
+        try {
+            files = await this.sftp.readdir(newPath)
+        } catch (error) {
+            if (navigation !== this.navigation || !this.navigationAvailable()) { return }
+            this.notifications.error(error.message)
+            if (!this.fileList) { this.fileList = []; this.filteredFileList = [] }
+            if (!hadListing && fallbackOnError && newPath !== '/') { await this.navigate('/', false) }
+            return
+        } finally {
+            if (navigation === this.navigation) { this.loadingPath = null }
+        }
+        if (navigation !== this.navigation || !this.navigationAvailable()) { return }
         this.path = newPath
         this.pathChange.next(this.path)
 
@@ -73,17 +98,7 @@ export class SFTPPanelComponent {
             p = parent
         }
 
-        this.fileList = null
-        this.filteredFileList = []
-        try {
-            this.fileList = await this.sftp.readdir(this.path)
-        } catch (error) {
-            this.notifications.error(error.message)
-            if (previousPath && fallbackOnError) {
-                this.navigate(previousPath, false)
-            }
-            return
-        }
+        this.fileList = files
 
         const dirKey = a => a.isDirectory ? 1 : 0
         this.fileList.sort((a, b) =>
@@ -91,6 +106,12 @@ export class SFTPPanelComponent {
             a.name.localeCompare(b.name))
 
         this.updateFilteredList()
+    }
+
+    private navigationAvailable (): boolean {
+        // SFTP is assigned asynchronously in ngOnInit, after the view is created.
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+        return !!this.sftp && !this.destroyed
     }
 
     getFileType (fileExtension: string): string {

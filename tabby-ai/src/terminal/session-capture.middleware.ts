@@ -8,6 +8,8 @@ export class AISessionCaptureMiddleware extends SessionMiddleware {
     private outputBuffer = ''
     private flushTimer?: ReturnType<typeof setTimeout>
     private decoder = new StringDecoder('utf8')
+    private sessionId: string
+    private flushOutput = (): void => this.flush()
 
     constructor (
         private runtime: AISessionRuntime,
@@ -15,9 +17,15 @@ export class AISessionCaptureMiddleware extends SessionMiddleware {
         private redactor: SecretRedactor,
     ) {
         super()
+        this.sessionId = runtime.id
+        runtime.flushOutput = this.flushOutput
     }
 
     feedFromSession (data: Buffer): void {
+        if (this.sessionId !== this.runtime.id) {
+            this.flush()
+            this.sessionId = this.runtime.id
+        }
         this.outputBuffer += this.decoder.write(data)
         if (this.outputBuffer.length >= 262144) {
             this.flush()
@@ -32,6 +40,7 @@ export class AISessionCaptureMiddleware extends SessionMiddleware {
     }
 
     close (): void {
+        if (this.runtime.flushOutput === this.flushOutput) { this.runtime.flushOutput = undefined }
         if (this.flushTimer) {
             clearTimeout(this.flushTimer)
         }
@@ -50,6 +59,6 @@ export class AISessionCaptureMiddleware extends SessionMiddleware {
         }
         const content = this.redactor.redact(this.outputBuffer)
         this.outputBuffer = ''
-        void this.sessions.append(this.runtime, 'ssh-output', { content })
+        void this.sessions.appendToContext(this.runtime, this.sessionId, 'ssh-output', { content })
     }
 }

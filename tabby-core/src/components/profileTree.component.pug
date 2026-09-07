@@ -1,4 +1,7 @@
 .p-2.h-100.d-flex.flex-column
+    button.btn.btn-sm.btn-link.align-self-start(*ngIf='embedded', (click)='newGroup()')
+        i.fas.fa-folder-plus.me-1
+        | 新建分组
     input.form-control.form-control-sm.mb-1(
         type='text',
         [(ngModel)]='filter',
@@ -25,6 +28,8 @@
                     .fw-20
                         profile-icon.ms-1([icon]='group.icon ?? "far fa-folder"', [color]='group?.color')
                     span.ms-2.me-auto {{ group.name || ("Ungrouped"|translate) }}
+                    button.btn.btn-sm.btn-link(*ngIf='group.editable', (click)='$event.preventDefault(); $event.stopPropagation(); editProfileGroup(group)', aria-label='编辑分组', title='编辑分组')
+                        i.fas.fa-pen
 
                 ng-container(*ngIf='!group.collapsed')
                     ng-container(*ngFor='let profile of group.profiles')
@@ -45,5 +50,6 @@
                     ng-container(*ngFor='let child of group.children')
                         ng-container(*ngTemplateOutlet='recursiveGroup; context: {$implicit: child, depth: depth + 1}')
 .grabber(
+    *ngIf='!embedded',
     (mousedown)="startResize($event)"
 )

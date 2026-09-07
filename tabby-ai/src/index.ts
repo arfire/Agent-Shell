@@ -6,6 +6,8 @@ import { NgbModule } from '@ng-bootstrap/ng-bootstrap'
 import { ToastrModule } from 'ngx-toastr'
 import { SettingsTabProvider } from 'tabby-settings'
 import { TerminalDecorator } from 'tabby-terminal'
+import { WorkspacePanelProvider } from 'tabby-core'
+import { AgentHistoryComponent, AgentHistoryProvider } from './ui/agent-history.component'
 
 import { AISettingsTabComponent } from './components/aiSettingsTab.component'
 import { AISettingsTabProvider } from './settings'
@@ -14,8 +16,9 @@ import { AgentDockComponent } from './ui/agent-dock.component'
 
 @NgModule({
     imports: [CommonModule, FormsModule, NgbModule, ToastrModule],
-    declarations: [AISettingsTabComponent, AgentDockComponent],
+    declarations: [AISettingsTabComponent, AgentDockComponent, AgentHistoryComponent],
     providers: [
+        { provide: WorkspacePanelProvider, useClass: AgentHistoryProvider, multi: true },
         { provide: SettingsTabProvider, useClass: AISettingsTabProvider, multi: true },
         { provide: TerminalDecorator, useClass: AITerminalDecorator, multi: true },
     ],

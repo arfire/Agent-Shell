@@ -101,6 +101,8 @@ async function main () {
         const injector = ng.getInjector(document.querySelector('app-root'))
         const profiles = injector.get(core.ProfilesService)
         const profile = profiles.getConfigProxyForProfile({ id: 'native-agent-test', type: 'ssh', name: 'Native Agent · Local QA', options: { host: '127.0.0.1', user: 'ash${testShell}', port: ${Number(process.env.ASH_TEST_SSH_PORT)}, auth: 'password', password: ${JSON.stringify(process.env.ASH_TEST_PASSWORD)}, reuseSession: false }, clearServiceMessagesOnConnect: false })
+        injector.get(core.ConfigService).store.profiles.push(JSON.parse(JSON.stringify(profile)))
+        await injector.get(core.ConfigService).save()
         injector.get(core.NgZone ?? require('@angular/core').NgZone).run(() => {
             window.nativeTest = appRoot.app.openNewTab({ type: ssh.SSHTabComponent, inputs: { profile } })
         })
@@ -143,6 +145,69 @@ async function main () {
     assert.ok(requests.join('').includes('__TABBY_SENSITIVE_1__'), 'Secret placeholder was not provided to model')
     const ready = () => wait('!!ng.getComponent(document.querySelector("ash-agent-dock"))?.terminal.attachments.get(nativeTest)?.input.canCapture', 'fresh prompt')
     await ready()
+    // Reuse production sidebar components against the disposable SSH server.
+    const inZone = code => evaluate('(async()=>{const zone=nativeTestInjector.get(require("@angular/core").NgZone);return await zone.run(async()=>{' + code + '})})()')
+    await inZone('ng.getComponent(document.querySelector("workspace-sidebar")).select("files");return true')
+    await wait('!!ng.getComponent(document.querySelector("sftp-panel"))?.fileList', 'SFTP sidebar connected')
+    assert.equal(await inZone(`
+        const sidebar=ng.getComponent(document.querySelector('workspace-sidebar'))
+        const panel=ng.getComponent(document.querySelector('sftp-panel'))
+        const app=nativeTestInjector.get(require('tabby-core').AppService)
+        for(let i=0;i<5;i++) { app.getParentTab(nativeTest).focus(nativeTest); sidebar.select('files') }
+        return panel===ng.getComponent(document.querySelector('sftp-panel'))
+    `), true, 'Repeated terminal focus rebuilt SFTP')
+    await inZone('ng.getComponent(document.querySelector("workspace-files")).setFollow(true);return true')
+    await send('cd /tmp\r'); await ready()
+    await wait('ng.getComponent(document.querySelector("sftp-panel"))?.path === "/tmp"', 'SFTP follows Shell cwd')
+    await inZone('ng.getComponent(document.querySelector("workspace-files")).setFollow(false);return true')
+    await send('cd /etc\r'); await ready(); await delay(650)
+    assert.equal(await evaluate('ng.getComponent(document.querySelector("sftp-panel")).path'), '/tmp', 'Disabled follow changed SFTP path')
+    await inZone('await ng.getComponent(document.querySelector("workspace-files")).jump();return true')
+    await wait('ng.getComponent(document.querySelector("sftp-panel"))?.path === "/etc"', 'manual cwd jump')
+    const sftpGeometry = await evaluate('(()=>{const panel=document.querySelector("sftp-panel");return {header:panel.querySelector(".header").getBoundingClientRect().bottom,body:panel.querySelector(".body").getBoundingClientRect().top}})()')
+    assert.ok(sftpGeometry.header <= sftpGeometry.body + 1, 'SFTP toolbar overlaps file list')
+    await screen('sidebar-files')
+    await inZone('await ng.getComponent(document.querySelector("sftp-panel")).navigate("/ash-path-does-not-exist");return true')
+    assert.equal(await evaluate('ng.getComponent(document.querySelector("sftp-panel")).path'), '/etc', 'Failed navigation lost previous directory')
+    await inZone('nativeTestInjector.get(require("ngx-toastr").ToastrService).clear();return true')
+    await inZone(`
+        ng.getComponent(document.querySelector('workspace-sidebar')).select('servers')
+        const modals=nativeTestInjector.get(require('@ng-bootstrap/ng-bootstrap').NgbModal)
+        const open=modals.open.bind(modals)
+        modals.open=(...args)=>{modals.open=open;return window.nativeTestGroupModal=open(...args)}
+        return true
+    `)
+    await wait('!!document.querySelector("profile-tree")', 'server tree')
+    await inZone('void ng.getComponent(document.querySelector("profile-tree")).newGroup();return true')
+    await wait('!!window.nativeTestGroupModal', 'new group editor')
+    await inZone('nativeTestGroupModal.componentInstance.group.name="QA 空分组";await nativeTestGroupModal.componentInstance.save();return true')
+    await wait('ng.getComponent(document.querySelector("profile-tree")).profileGroups.some(g=>g.name==="QA 空分组")', 'empty group persisted')
+    await inZone(`
+        const tree=ng.getComponent(document.querySelector('profile-tree'))
+        const profile=(await nativeTestInjector.get(require('tabby-core').ProfilesService).getProfiles()).find(p=>p.id==='native-agent-test')
+        await tree.moveProfile(profile,tree.profileGroups.find(g=>g.name==='QA 空分组').id)
+        return true
+    `)
+    await wait('ng.getComponent(document.querySelector("profile-tree")).profileGroups.some(g=>g.name==="QA 空分组" && g.profiles.some(p=>p.id==="native-agent-test"))', 'server moved into group')
+    await inZone('ng.getComponent(document.querySelector("workspace-sidebar")).select("agent");return true')
+    await wait('!!ng.getComponent(document.querySelector("agent-history"))?.entries.length', 'Agent history list')
+    const oldContext = await evaluate('ng.getComponent(document.querySelector("ash-agent-dock")).runtime.id')
+    await inZone('const history=ng.getComponent(document.querySelector("agent-history"));history.startRename(history.entries.find(e=>e.id===' + JSON.stringify(oldContext) + '));history.renameText="我的排障记录";await history.rename();return true')
+    await wait('ng.getComponent(document.querySelector("agent-history")).entries.some(e=>e.title==="我的排障记录")', 'custom session title persisted')
+    await inZone('const history=ng.getComponent(document.querySelector("agent-history"));await history.inspect(history.entries.find(e=>e.id===' + JSON.stringify(oldContext) + '));return true')
+    assert.match(await evaluate('ng.getComponent(document.querySelector("agent-history")).preview'), /帮我检查当前终端/)
+    await inZone('await ng.getComponent(document.querySelector("agent-history")).load();return true')
+    assert.notEqual(await evaluate('ng.getComponent(document.querySelector("ash-agent-dock")).runtime.id'), oldContext)
+    await send('新的独立会话测试\r')
+    await wait('!ng.getComponent(document.querySelector("ash-agent-dock")).runtime.activeRunId && ng.getComponent(document.querySelector("ash-agent-dock")).runtime.state.value === "DONE"', 'new context response')
+    assert.equal(JSON.parse(requests.at(-1)).messages.some(message => message.content?.includes('帮我检查当前终端')), false, 'New context inherited old conversation')
+    await inZone('const history=ng.getComponent(document.querySelector("agent-history"));await history.load(history.entries.find(e=>e.id===' + JSON.stringify(oldContext) + '));return true')
+    assert.equal(await evaluate('ng.getComponent(document.querySelector("ash-agent-dock")).runtime.id'), oldContext)
+    await send('恢复上下文测试\r')
+    await wait('!ng.getComponent(document.querySelector("ash-agent-dock")).runtime.activeRunId && ng.getComponent(document.querySelector("ash-agent-dock")).runtime.state.value === "DONE"', 'restored context response')
+    assert.ok(JSON.parse(requests.at(-1)).messages.some(message => message.content?.includes('帮我检查当前终端')), 'Restored context missing from model request')
+    await screen('sidebar-history')
+    await inZone('ng.getComponent(document.querySelector("workspace-sidebar")).toggle();return true')
     await evaluate('nativeTest.frontend.focus(); true')
     await call('Input.imeSetComposition', { text: '中文输入', selectionStart: 4, selectionEnd: 4 })
     await call('Input.insertText', { text: '中文输入' })
@@ -172,6 +237,13 @@ async function main () {
     await send('echo HISTORY_CHECK\r'); await ready()
     await send('\x1b[A'); await send('\r'); await ready()
     assert.ok((await terminalText()).split('HISTORY_CHECK').length >= 3, 'History recall did not execute')
+    await send('echo EDIT_HISTORY_KEEPX\r'); await ready()
+    await send('\x1b[A'); await delay(250)
+    await send('\x7f\r'); await ready()
+    await wait('ng.getComponent(document.querySelector("ash-agent-dock")).runtime.events.value.some(e=>e.type==="ssh-input" && e.data.content.trim()==="echo EDIT_HISTORY_KEEP")', 'history deletion recorded exact executed command')
+    await send('echo READLINE_KEEPX'); await send('\x01'); await delay(250)
+    await send('\x05\x7f\r'); await ready()
+    await wait('ng.getComponent(document.querySelector("ash-agent-dock")).runtime.events.value.some(e=>e.type==="ssh-input" && e.data.content.trim()==="echo READLINE_KEEP")', 'readline shortcut deletion')
     await send('echo COMPLETION_CHECK'); await send('\t'); await send('\r'); await ready()
     await send("sh -c 'sleep .4; printf \"\\nASYNC_OUTPUT\\n\"' &\r"); await ready()
     await send('异步输出期间保留本地输入')
@@ -210,6 +282,80 @@ async function main () {
     assert.match(await terminalText(), /HANDOFF_DONE/)
     assert.equal(await evaluate('ng.getComponent(document.querySelector("ash-agent-dock")).runtime.events.value.some(event => event.type === "command-result" && event.data.handedOff && event.data.exitCode === 0)'), true)
     await screen('original-mode')
+    await send('echo REPLAY_SIDE_EFFECT >> /tmp/ash-replay-' + testShell + '\r')
+    await delay(500)
+    const requestsBeforeReopen = requests.length
+    await inZone(`
+        const app=nativeTestInjector.get(require('tabby-core').AppService)
+        await app.closeTab(app.getParentTab(nativeTest))
+        ng.getComponent(document.querySelector('workspace-sidebar')).select('agent')
+        return true
+    `)
+    await wait('document.querySelector("agent-history") && !!ng.getComponent(document.querySelector("agent-history"))?.entries.length', 'history after terminal closed')
+    await inZone('const history=ng.getComponent(document.querySelector("agent-history"));await history.open(history.entries.find(e=>e.id===' + JSON.stringify(oldContext) + '));window.nativeTest=history.sessions.find(' + JSON.stringify(oldContext) + ')?.tab;return true')
+    await wait('document.querySelector("ash-agent-dock") && !!ng.getComponent(document.querySelector("ash-agent-dock"))?.runtime', 'history SSH tab opened')
+    await evaluate('window.nativeTest=ng.getComponent(document.querySelector("ash-agent-dock")).runtime.tab;true')
+    await ready()
+    await screen('history-reopened')
+    assert.match(await terminalText(), /历史记录（仅展示）/)
+    assert.match(await terminalText(), /EDIT_HISTORY_KEEP/)
+    assert.match(await terminalText(), /当前终端工作正常/)
+    assert.match(await terminalText(), /本次连接/)
+    assert.equal(requests.length, requestsBeforeReopen, 'History replay started an Agent run')
+    await send('wc -l < /tmp/ash-replay-' + testShell + '\r'); await ready(); await delay(500)
+    const tail = (await terminalText()).trim().split('\n').slice(-6).join('\n')
+    assert.match(tail, /(?:^|\n)\s*1\s*(?:\n|$)/, 'History replay executed an old Shell command')
+    await screen('history-reopened')
+    // Use the actual Angular settings page, isolated configuration and native Dock.
+    await evaluate('require("@electron/remote").getCurrentWindow().setSize(1280,800); true')
+    await inZone(`
+        const app=nativeTestInjector.get(require('tabby-core').AppService)
+        window.qaSettingsTab=app.openNewTab({type:require('tabby-settings').SettingsTabComponent,inputs:{activeTab:'ai'}})
+        return true
+    `)
+    await wait('document.querySelector("ash-ai-settings") && !!ng.getComponent(document.querySelector("ash-ai-settings"))?.model', 'AI settings rendered')
+    assert.equal(await evaluate('!!document.querySelector("settings-tab .fa-wand-magic-sparkles")'), true)
+    assert.equal(await inZone(`
+        const s=ng.getComponent(document.querySelector('ash-ai-settings'))
+        window.qaAISettings=s
+        window.qaOriginalAIConfig=JSON.parse(JSON.stringify(s.configService.config))
+        s.section='input'
+        s.shellCommands+=String.fromCharCode(10)+'qa_custom_shell'
+        s.previewCommand='qa_custom_shell --version'
+        s.preview()
+        await s.save()
+        return s.configService.config.inputDetection.shellCommands.includes('qa_custom_shell') &&
+            JSON.stringify(s.configService.config.inputDetection.shellPatterns)===JSON.stringify(qaOriginalAIConfig.inputDetection.shellPatterns) && s.previewResult.includes('Shell')
+    `), true)
+    await screen('ai-settings-input')
+    assert.equal(await inZone(`
+        const s=qaAISettings
+        await s.restoreDefaults()
+        s.section='policy'
+        s.model.policy.approvalMode='auto'
+        s.addRule()
+        Object.assign(s.model.policy.commandRules.at(-1),{command:'printf',risk:'MODIFY'})
+        await s.save()
+        return s.configService.config.policy.approvalMode==='auto' && s.model.llm.apiKey===qaOriginalAIConfig.llm.apiKey
+    `), true)
+    await screen('ai-settings-permissions')
+    await inZone('await nativeTestInjector.get(require("tabby-core").AppService).closeTab(qaSettingsTab);return true')
+    await ready()
+    await send('审批测试\r')
+    await wait('!ng.getComponent(document.querySelector("ash-agent-dock")).runtime.activeRunId && ng.getComponent(document.querySelector("ash-agent-dock")).runtime.state.value === "DONE"', 'auto mode without approval')
+    assert.equal(await evaluate('!!document.querySelector("ash-agent-dock textarea")'), false)
+    await inZone(`
+        const config=JSON.parse(JSON.stringify(qaAISettings.configService.config))
+        config.policy.commandRules=[{command:'printf',risk:'DENY'}]
+        await qaAISettings.configService.save(config)
+        window.localStorage.ashFullAccessAcknowledged='true'
+        await ng.getComponent(document.querySelector('ash-agent-dock')).changePermission('full')
+        return true
+    `)
+    await send('审批测试\r')
+    await wait('!ng.getComponent(document.querySelector("ash-agent-dock")).runtime.activeRunId && ng.getComponent(document.querySelector("ash-agent-dock")).runtime.state.value === "DONE"', 'full mode executes configured denied command')
+    assert.equal(await evaluate('ng.getComponent(document.querySelector("ash-agent-dock")).runtime.events.value.some(e=>e.type==="approval" && e.data.automatic && e.data.permissionMode==="full" && e.data.risk==="DENY")'), true)
+    await inZone('await qaAISettings.configService.save(qaOriginalAIConfig);await ng.getComponent(document.querySelector("ash-agent-dock")).changePermission("");return true')
     console.log('PASS Electron + SSH (' + testShell + '): input privacy, native output, approval, sensitive Dock, original mode')
     console.log('Screenshots and isolated data:', directory)
     fs.writeFileSync(path.join(root, '.build-cache/native-agent-ui-latest.txt'), directory)

@@ -65,9 +65,27 @@ export class Window {
         this.windowBounds = this.windowConfig.get('windowBoundaries')
 
         const maximized = this.windowConfig.get('maximized')
+        const display = this.windowBounds
+            ? screen.getDisplayMatching(this.windowBounds)
+            : screen.getPrimaryDisplay()
+        const workArea = display.workArea
+        const defaultWidth = Math.min(1280, Math.floor(workArea.width * 0.92))
+        const defaultHeight = Math.min(800, Math.floor(workArea.height * 0.92))
+        // Make room for the workspace sidebar once, then keep the user's size.
+        if (!this.windowConfig.get('workspaceLayoutVersion') && this.windowBounds && (this.configStore.appearance?.dock ?? 'off') === 'off') {
+            const width = Math.min(workArea.width, Math.max(this.windowBounds.width, defaultWidth))
+            const height = Math.min(workArea.height, Math.max(this.windowBounds.height, defaultHeight))
+            this.windowBounds = {
+                width,
+                height,
+                x: Math.max(workArea.x, Math.min(this.windowBounds.x, workArea.x + workArea.width - width)),
+                y: Math.max(workArea.y, Math.min(this.windowBounds.y, workArea.y + workArea.height - height)),
+            }
+            this.windowConfig.set('windowBoundaries', this.windowBounds)
+        }
         const bwOptions: BrowserWindowConstructorOptions = {
-            width: 800,
-            height: 600,
+            width: defaultWidth,
+            height: defaultHeight,
             title: 'Tabby',
             minWidth: 400,
             minHeight: 300,
@@ -117,6 +135,7 @@ export class Window {
         } else {
             this.window = new glasstron.BrowserWindow(bwOptions)
         }
+        this.windowConfig.set('workspaceLayoutVersion', 1)
 
         this.webContents = this.window.webContents
 

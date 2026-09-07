@@ -6,6 +6,7 @@ import { SessionEvent } from '../session/session-event'
 import { TerminalControllerService } from './terminal-controller.service'
 import { terminalText } from './terminal-text'
 import { TerminalMarkdown, terminalMarkdown } from './terminal-markdown'
+import { historyChunks } from './session-history'
 
 interface Presentation {
     runtime: AISessionRuntime
@@ -25,6 +26,36 @@ export class AgentTerminalPresenter {
     private runs = new Map<string, Presentation>()
 
     constructor (private terminal: TerminalControllerService) { }
+
+    async replay (runtime: AISessionRuntime, events: SessionEvent[]): Promise<void> {
+        if (!events.length) { return }
+        if (runtime.locked || runtime.activeRunId) { throw new Error('请等待当前 Agent 完成') }
+        runtime.locked = true
+        runtime.state.next('RESTORING_HISTORY')
+        try {
+            await this.terminal.waitForPrompt(runtime)
+            if (!this.terminal.canRestoreHistory(runtime)) { throw new Error('请先结束 Shell 输入，再恢复历史记录') }
+            this.terminal.setLocalPresentation(runtime, true)
+            await runtime.tab.write('\r\n\x1b[2m── 历史记录（仅展示）──\x1b[0m\r\n')
+            for (const text of historyChunks(events)) {
+                for (let offset = 0; offset < text.length;) {
+                    if (!runtime.tab.session?.open) { throw new Error('SSH 连接已断开') }
+                    let end = Math.min(offset + 8192, text.length)
+                    const last = text.charCodeAt(end - 1)
+                    if (end < text.length && last >= 0xd800 && last <= 0xdbff) { end-- }
+                    await runtime.tab.write(text.slice(offset, end))
+                    offset = end
+                }
+            }
+            await runtime.tab.write('\r\n\x1b[0m\x1b[2m── 本次连接 ──\x1b[0m\r\n')
+            this.terminal.setLocalPresentation(runtime, false)
+            await this.terminal.restorePrompt(runtime)
+        } finally {
+            this.terminal.setLocalPresentation(runtime, false)
+            runtime.locked = false
+            runtime.state.next('IDLE')
+        }
+    }
 
     async open (runtime: AISessionRuntime, runId: string, _stop?: () => void, _seq = 0): Promise<void> {
         if (runtime.state.value === 'WAITING_INTERACTION' && this.terminal.isExecuting(runtime)) {

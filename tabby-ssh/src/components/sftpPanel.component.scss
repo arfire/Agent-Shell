@@ -5,6 +5,7 @@
     > .header {
         padding: 5px 15px 0 20px;
         display: flex;
+        flex-wrap: wrap;
         align-items: center;
         flex: none;
     }
@@ -54,6 +55,18 @@
     .date {
         width: 200px;
     }
+
+    .list-group-item { min-width: 0; }
+    .list-group-item > div:first-of-type { overflow-wrap: anywhere; min-width: 0; }
+}
+
+:host-context(workspace-files) {
+    > .header { height: auto; min-height: 0; gap: 4px; padding-bottom: 8px; }
+    .breadcrumb { flex: 0 0 100%; overflow-wrap: anywhere; }
+    .breadcrumb-spacer { display: none; }
+    .mode, .date { display: none; }
+    .size { width: auto; margin-left: 8px; }
+    > .header, > .body { padding-left: 8px; padding-right: 8px; }
 }
 
 .btn-link svg {

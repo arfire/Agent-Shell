@@ -40,6 +40,7 @@ export class TerminalControllerService {
     async attachMiddleware (tab: SSHTabComponent, runtime: AISessionRuntime, onAIRequest: AIRequestHandler): Promise<void> {
         if (!tab.session || this.attachments.get(tab)?.session === tab.session) { return }
         this.detach(tab)
+        runtime.approvalMode = undefined
         const session = tab.session
         const integration = new ShellIntegration(async () => { await tab.write('') })
         const input = new AIInputMiddleware(runtime, this.sessions, this.detector, integration,
@@ -62,9 +63,25 @@ export class TerminalControllerService {
                 event.stopImmediatePropagation()
             }
         }
+        let userCommandPending = false
         const subscriptions = [
+            integration.command.subscribe(command => {
+                if (!runtime.activeRunId && command.trim() && !command.trimStart().startsWith('__ash_')) {
+                    userCommandPending = true
+                    if (input.readlineOwned) {
+                        void this.sessions.append(runtime, 'ssh-input', { content: command, source: 'user' })
+                    }
+                }
+            }),
+            integration.commandFinished.subscribe(exitCode => {
+                if (userCommandPending) {
+                    userCommandPending = false
+                    void this.sessions.append(runtime, 'command-result', { exitCode, source: 'user' })
+                }
+            }),
             integration.mode.subscribe(update), integration.state.subscribe(update),
             integration.prompt.subscribe(() => {
+                if (integration.workingDirectory) { session.reportWorkingDirectory(integration.workingDirectory) }
                 framing.promptReady()
                 if (!integration.promptText && tab.frontend instanceof XTermFrontend) {
                     const buffer = tab.frontend.xterm.buffer.active
@@ -159,6 +176,13 @@ export class TerminalControllerService {
 
     isExecuting (runtime: AISessionRuntime): boolean {
         return this.attachments.get(runtime.tab)?.framing.isExecuting ?? false
+    }
+
+    canRestoreHistory (runtime: AISessionRuntime): boolean {
+        const attachment = this.attachments.get(runtime.tab)
+        return !!attachment && attachment.integration.mode.value === 'agent' && attachment.integration.ready &&
+            !attachment.integration.alternateScreen && !attachment.input.hasInput && !attachment.input.remoteEditing &&
+            !attachment.framing.isExecuting
     }
 
     setLocalPresentation (runtime: AISessionRuntime, active: boolean): void {

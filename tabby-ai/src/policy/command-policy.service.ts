@@ -1,7 +1,7 @@
 import { Injectable } from '@angular/core'
 
 import { AIConfigService } from '../config/ai-config.service'
-import { CommandRisk } from '../config/config-schema'
+import { AIConfig, CommandRisk } from '../config/config-schema'
 
 export interface CommandPolicyDecision {
     risk: CommandRisk
@@ -21,7 +21,7 @@ const RISK_WEIGHT: Record<CommandRisk, number> = {
 export class CommandPolicyService {
     constructor (private configService: AIConfigService) { }
 
-    evaluate (command: string, shell?: string): CommandPolicyDecision {
+    evaluate (command: string, shell?: string, policy: AIConfig['policy'] = this.configService.config.policy): CommandPolicyDecision {
         const commands = splitShellCommands(command)
         let result: CommandPolicyDecision = {
             risk: 'SAFE',
@@ -34,7 +34,7 @@ export class CommandPolicyService {
         }
 
         for (const segment of commands) {
-            const decision = this.evaluateSegment(segment)
+            const decision = this.evaluateSegment(segment, policy)
             if (RISK_WEIGHT[decision.risk] > RISK_WEIGHT[result.risk]) {
                 result = { ...decision, commands }
             }
@@ -47,20 +47,23 @@ export class CommandPolicyService {
         return result
     }
 
-    private evaluateSegment (segment: string): Omit<CommandPolicyDecision, 'commands'> {
-        const policy = this.configService.config.policy
+    private evaluateSegment (segment: string, policy: AIConfig['policy']): Omit<CommandPolicyDecision, 'commands'> {
         const candidates = [...new Set([segment, unwrapCommand(segment)])]
+        const custom = (policy.commandRules ?? []).filter(rule => {
+            const prefix = rule.command.trim().split(/\s+/).map(word => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+')
+            return candidates.some(candidate => new RegExp('^\\s*' + prefix + '(?:\\s|$)').test(candidate))
+        }).sort((a, b) => RISK_WEIGHT[b.risk] - RISK_WEIGHT[a.risk]).find((_rule, index) => index === 0)
         const match = (patterns: string[]): string|undefined => patterns.find(pattern => {
             const regex = createRegex(pattern)
             return candidates.some(candidate => regex.test(candidate))
         })
 
         let rule = match(policy.deny)
-        if (rule) {
-            return { risk: 'DENY', reason: 'A deny rule matched this command.', matchedRule: rule }
+        if (rule !== undefined || custom?.risk === 'DENY') {
+            return { risk: 'DENY', reason: 'A deny rule matched this command.', matchedRule: rule ?? custom?.command }
         }
         rule = match(policy.requireSecondApproval)
-        if (rule) {
+        if (rule !== undefined || custom?.risk === 'DANGEROUS') {
             return { risk: 'DANGEROUS', reason: 'This command requires two confirmations.', matchedRule: rule }
         }
         if (readsSensitiveFile(segment)) {
@@ -86,6 +89,9 @@ export class CommandPolicyService {
                 risk: maxRisk(policy.defaultRisk, 'MODIFY'),
                 reason: 'Shell output redirection may change remote state and requires approval.',
             }
+        }
+        if (custom) {
+            return { risk: custom.risk, reason: `Matched command rule: ${custom.command}`, matchedRule: custom.command }
         }
         rule = match(policy.requireApproval)
         if (rule) {
@@ -180,7 +186,7 @@ export function splitShellCommands (source: string): string[] {
 }
 
 function containsDynamicExecution (command: string): boolean {
-    return /(^|\s)(eval|source|\.)\s|`|\$\(|\bxargs\b.*\b(sh|bash|zsh)\b/i.test(command)
+    return /(^|\s)(eval|source|\.)\s|`|\$\(|\bxargs\b.*\b(sh|bash|zsh)\b|\b(?:sh|bash|zsh|fish)\s+(?:-\S+\s+)*-\w*c\b/i.test(command)
 }
 
 function readsSensitiveFile (command: string): boolean {

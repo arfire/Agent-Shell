@@ -43,6 +43,7 @@ const { AIInputDetector, unwrapShellFence } = load('tabby-ai/src/terminal/input-
 const { AIInputMiddleware } = load('tabby-ai/src/terminal/ai-input.middleware.ts')
 const { ShellIntegration, detectShellKind, shellBootstrap } = load('tabby-ai/src/terminal/shell-integration.ts')
 const { TerminalTextFilter } = load('tabby-ai/src/terminal/terminal-text.ts')
+const { historyChunks } = load('tabby-ai/src/terminal/session-history.ts')
 const { TerminalMarkdown, terminalMarkdown } = load('tabby-ai/src/terminal/terminal-markdown.ts')
 const { CommandFramingMiddleware } = load('tabby-ai/src/terminal/command-framing.middleware.ts')
 const { SecretRedactor } = load('tabby-ai/src/policy/secret-redactor.ts')
@@ -78,6 +79,105 @@ async function fixture () {
 }
 
 async function main () {
+    const { approvalAction, AgentPermissionsService } = load('tabby-ai/src/policy/agent-permissions.service.ts')
+    const { CommandPolicyService } = load('tabby-ai/src/policy/command-policy.service.ts')
+    const { AgentService } = load('tabby-ai/src/agent/agent.service.ts')
+    await test('permission tiers execute, request approval and deny consistently through Agent tools', async () => {
+        for (const [mode, expected] of Object.entries({ configured: ['execute', 'ask', 'ask', 'deny'], auto: ['execute', 'execute', 'ask', 'deny'], full: ['execute', 'execute', 'execute', 'execute'] })) {
+            for (const [index, risk] of ['SAFE', 'MODIFY', 'DANGEROUS', 'DENY'].entries()) {
+                const config = { config: { ...defaults, policy: { ...defaults.policy, approvalMode: mode, autoApprove: [], requireApproval: [], requireSecondApproval: [], deny: [], commandRules: [{ command: 'printf', risk }] } } }
+                const events = [], approvals = [], executions = []
+                const runtime = { id: 'permissions', state: new BehaviorSubject('THINKING'), events: new BehaviorSubject([]) }
+                const run = { id: 'run', controller: new AbortController(), stopRequested: false, sensitive: new SecretRedactor(config).createScope() }
+                const agent = new AgentService(config, null, null, new CommandPolicyService(config), null,
+                    { append: async (_runtime, type, data) => events.push({ type, data }) },
+                    { request: async request => { approvals.push(request); return { approved: true, command: request.command } } },
+                    null, { execute: async (_runtime, command) => { executions.push(command); return { output: 'test', exitCode: 0 } } },
+                    { interrupt: async () => {}, open: async () => {} }, new AgentPermissionsService(config, null))
+                assert.equal(approvalAction(risk, mode), expected[index])
+                await agent.executeTool(runtime, run, { function: { name: 'terminal_exec', arguments: JSON.stringify({ command: 'printf test', reason: 'Test' }) } })
+                assert.equal(executions.length, expected[index] === 'deny' ? 0 : 1, mode + ':' + risk)
+                assert.equal(approvals.length, expected[index] === 'ask' ? 1 : 0)
+                if (approvals.length) assert.equal(approvals[0].confirmationsRequired, risk === 'DANGEROUS' ? 2 : 1)
+                if (expected[index] === 'execute') assert.ok(events.some(e => e.type === 'approval' && e.data.automatic && e.data.permissionMode === mode))
+                const before = executions.length
+                await agent.executeTool(runtime, run, { function: { name: 'terminal_exec', arguments: JSON.stringify({ command: '  ', reason: 'Test' }) } })
+                assert.equal(executions.length, before)
+            }
+        }
+    })
+    await test('permission snapshot stays stable and literal rules respect boundaries and dangerous syntax', () => {
+        const config = { config: { ...defaults, policy: { ...defaults.policy, approvalMode: 'configured', commandRules: [{ command: 'git status', risk: 'SAFE' }, { command: 'git push', risk: 'DENY' }] } } }
+        const permissions = new AgentPermissionsService(config, null)
+        const runtime = { approvalMode: 'auto' }
+        const snapshot = permissions.snapshot(runtime)
+        runtime.approvalMode = 'full'
+        config.config.policy.commandRules[0].risk = 'DENY'
+        const policy = new CommandPolicyService(config)
+        assert.equal(snapshot.mode, 'auto')
+        assert.equal(policy.evaluate('git status --short', 'bash', snapshot.policy).risk, 'SAFE')
+        assert.equal(policy.evaluate('sudo git push origin main', 'bash', snapshot.policy).risk, 'DENY')
+        assert.notEqual(policy.evaluate('git status-other', 'bash', snapshot.policy).risk, 'SAFE')
+        assert.equal(policy.evaluate('git status; sh -c "echo test"', 'bash', snapshot.policy).risk, 'DANGEROUS')
+    })
+    await test('full access reminder honors cancellation and remembers explicit acceptance', async () => {
+        const previous = global.window
+        global.window = { localStorage: {} }
+        try {
+            let calls = 0
+            const permissions = new AgentPermissionsService({ config: defaults }, { showMessageBox: async () => ({ response: calls++ ? 1 : 0 }) })
+            assert.equal(await permissions.confirmMode('auto'), true)
+            assert.equal(await permissions.confirmMode('full'), false)
+            assert.equal(global.window.localStorage.ashFullAccessAcknowledged, undefined)
+            assert.equal(await permissions.confirmMode('full'), true)
+            assert.equal(await permissions.confirmMode('full'), true)
+            assert.equal(calls, 2)
+        } finally { global.window = previous }
+    })
+    await test('disabling an optional redaction rule retains local secret placeholders', () => {
+        const config = { config: { ...defaults, redaction: { enabled: true, patterns: [{ name: 'custom', pattern: 'private-value', replacement: '[CUSTOM]', enabled: false }] } } }
+        const redactor = new SecretRedactor(config)
+        assert.equal(redactor.redact('private-value'), 'private-value')
+        config.config.redaction.patterns[0].enabled = true
+        assert.equal(redactor.redact('private-value'), '[CUSTOM]')
+        const scope = redactor.createScope()
+        const token = scope.register('local-password')
+        config.config.redaction.enabled = false
+        assert.equal(scope.protect('local-password'), token)
+        assert.equal(scope.restore(token), 'local-password')
+    })
+    await test('readline history survives prompt repaint and forwards editing until submit or cancel', async () => {
+        const f = await fixture()
+        try {
+            await f.type('\x1b[A')
+            await f.prompt()
+            assert.equal(f.input.canCapture, false)
+            await f.type('\x7f\x1b[D\x08')
+            assert.equal(f.sent.join(''), '\x1b[A\x7f\x1b[D\x08')
+            await f.type('\r')
+            await f.prompt()
+            assert.equal(f.input.canCapture, true)
+            await f.type('\x12')
+            await f.prompt()
+            await f.type('\x03')
+            await f.prompt()
+            assert.equal(f.input.canCapture, true)
+        } finally { f.close() }
+    })
+    await test('restored transcript retains commands and output but never replays terminal control sequences', () => {
+        const restored = [...historyChunks([
+            { type: 'user-ai-input', data: { content: '检查目录' } },
+            { type: 'ssh-input', data: { content: 'pwd' } },
+            { type: 'ssh-output', data: { content: '\x1b]52;c;PRIVATE' } },
+            { type: 'ssh-output', data: { content: '\x07/home/test\r\n\x1b[2J' } },
+            { type: 'ai-message', data: { content: '**完成**' } },
+        ])].join('')
+        assert.match(restored, /检查目录/)
+        assert.match(restored, /\$ pwd/)
+        assert.match(restored, /\/home\/test/)
+        assert.equal(restored.includes('PRIVATE'), false)
+        assert.equal(restored.replace(/\x1b\[[\d;]*m/g, '').includes('\x1b'), false)
+    })
     await test('Markdown streams identical text and styles across arbitrary chunk boundaries', async () => {
         const source = '# 标题\n正文 **重点** 和 *斜体*、`echo hi`、~~旧项~~。\n- 项目\n> 引用\n```bash\necho "**literal**"\n```\n[链接](https://example.com)\n末尾'
         const render = async parts => {

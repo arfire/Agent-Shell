@@ -1,9 +1,9 @@
 import * as russh from 'russh'
 import { marker as _ } from '@biesbjerg/ngx-translate-extract-marker'
 import colors from 'ansi-colors'
-import { Component, Injector, HostListener } from '@angular/core'
+import { Component, Injector } from '@angular/core'
 import { NgbModal } from '@ng-bootstrap/ng-bootstrap'
-import { Platform, ProfilesService } from 'tabby-core'
+import { Platform, ProfilesService, WorkspacePanelService } from 'tabby-core'
 import { BaseTerminalTabComponent, ConnectableTerminalTabComponent } from 'tabby-terminal'
 import { SSHService } from '../services/ssh.service'
 import { KeyboardInteractivePrompt, SSHSession } from '../session/ssh'
@@ -217,14 +217,7 @@ export class SSHTabComponent extends ConnectableTerminalTabComponent<SSHProfile>
 
     async openSFTP (): Promise<void> {
         this.sftpPath = await this.session?.getWorkingDirectory() ?? this.sftpPath
-        setTimeout(() => {
-            this.sftpPanelVisible = true
-        }, 100)
-    }
-
-    @HostListener('click')
-    onClick (): void {
-        this.sftpPanelVisible = false
+        this.injector.get(WorkspacePanelService).open('files')
     }
 
     protected isSessionExplicitlyTerminated (): boolean {

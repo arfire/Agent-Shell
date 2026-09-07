@@ -17,8 +17,8 @@
 
     .breadcrumb-spacer.flex-grow-1.h-100((dblclick)='editPath()')
 
-    button.btn.btn-link.btn-sm.flex-shrink-0.d-flex((click)='navigate(path)')
-        i.fas.fa-sync-alt.me-1
+    button.btn.btn-link.btn-sm.flex-shrink-0.d-flex((click)='navigate(path)', [disabled]='loadingPath !== null')
+        i.fas.fa-sync-alt.me-1([class.fa-spin]='loadingPath !== null')
         div(translate) Refresh
 
     button.btn.btn-link.btn-sm.flex-shrink-0.d-flex(*ngIf='!showFilter', (click)='showFilter = true')
@@ -37,7 +37,7 @@
         i.fas.fa-upload.me-1
         div(translate) Upload folder
 
-    button.btn.btn-link.text-decoration-none((click)='close()') !{require('../../../tabby-core/src/icons/times.svg')}
+    button.btn.btn-link.text-decoration-none(*ngIf='!embedded', (click)='close()') !{require('../../../tabby-core/src/icons/times.svg')}
 
 .filter-bar.px-3.py-2.border-bottom(*ngIf='showFilter')
     .input-group
@@ -51,6 +51,8 @@
         )
         button.btn.btn-secondary((click)='clearFilter()')
             i.fas.fa-times
+
+small.px-3.py-1.text-muted.text-break(*ngIf='loadingPath !== null', role='status') 正在读取 {{loadingPath}}…
 
 .body(dropZone, (transfer)='uploadOneFolder($event)')
     a.alert.alert-info.d-flex.align-items-center(

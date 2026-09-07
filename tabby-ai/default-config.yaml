@@ -45,6 +45,7 @@ inputDetection:
     - journalctl
     - kill
     - less
+    - ll
     - ln
     - ls
     - lsof

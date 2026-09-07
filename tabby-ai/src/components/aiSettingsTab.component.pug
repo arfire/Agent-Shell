@@ -1,98 +1,132 @@
 h3 AI
-
 .alert.alert-warning(*ngIf='loadError')
-    strong The AI configuration could not be loaded.
+    strong AI 配置加载失败，当前使用默认配置。
     div {{ loadError }}
-    div Safe defaults are active. Saving will replace the invalid configuration.
-
-.alert.alert-info Changes take effect after Ash is restarted.
-
+.ai-settings-tabs(role='tablist')
+    button.btn.btn-sm(*ngFor='let item of sections', type='button', role='tab', [class.active]='section === item.id', [attr.aria-selected]='section === item.id', (click)='section = item.id') {{ item.label }}
 ng-container(*ngIf='model')
-    .form-line
-        .header
-            .title API Base URL
-        input.form-control(type='text', [(ngModel)]='model.llm.baseURL', (ngModelChange)='markChanged()')
+    .settings-section(*ngIf='section === "model"')
+        .form-line
+            .header
+                .title API Base URL
+            input.form-control(type='text', [(ngModel)]='model.llm.baseURL', (ngModelChange)='markChanged()')
 
-    .form-line
-        .header
-            .title API Key
-        input.form-control(type='password', [(ngModel)]='model.llm.apiKey', (ngModelChange)='markChanged()', autocomplete='off')
+        .form-line
+            .header
+                .title API Key
+            input.form-control(type='password', [(ngModel)]='model.llm.apiKey', (ngModelChange)='markChanged()', autocomplete='off')
 
-    .form-line
-        .header
-            .title Model
-        .input-group
-            input.form-control(type='text', [(ngModel)]='model.llm.model', (ngModelChange)='markChanged()')
-            button.btn.btn-outline-secondary.model-picker-button(
-                type='button',
-                (click)='loadModels()',
-                [disabled]='loadingModels || !model.llm.baseURL',
-                title='Read available model IDs from /models'
+        .form-line
+            .header
+                .title Model
+            .input-group
+                input.form-control(type='text', [(ngModel)]='model.llm.model', (ngModelChange)='markChanged()')
+                button.btn.btn-outline-secondary.model-picker-button(
+                    type='button',
+                    (click)='loadModels()',
+                    [disabled]='loadingModels || !model.llm.baseURL',
+                    title='Read available model IDs from /models'
+                )
+                    span(*ngIf='!loadingModels') Models
+                    span(*ngIf='loadingModels') Loading…
+
+        .model-picker(*ngIf='modelPickerVisible')
+            .model-picker-message(*ngIf='loadingModels') Reading available models…
+            select.form-select.model-picker-list(
+                *ngIf='!loadingModels && availableModels.length',
+                [ngModel]='model.llm.model',
+                (ngModelChange)='selectModel($event)',
+                [attr.size]='modelListSize',
+                aria-label='Available upstream model IDs'
             )
-                span(*ngIf='!loadingModels') Models
-                span(*ngIf='loadingModels') Loading…
+                option(*ngFor='let modelId of availableModels', [value]='modelId', [title]='modelId') {{ modelId }}
+            .model-picker-summary(*ngIf='!loadingModels && availableModels.length')
+                | {{ availableModels.length }} model(s)
+            .model-picker-message(
+                *ngIf='!loadingModels && modelListResult && !modelListResult.success',
+                class='model-picker-error'
+            ) {{ modelListResult.message }}
+            .model-picker-message(
+                *ngIf='!loadingModels && modelListResult && modelListResult.success && !availableModels.length'
+            ) No models were returned by /models.
 
-    .model-picker(*ngIf='modelPickerVisible')
-        .model-picker-message(*ngIf='loadingModels') Reading available models…
-        select.form-select.model-picker-list(
-            *ngIf='!loadingModels && availableModels.length',
-            [ngModel]='model.llm.model',
-            (ngModelChange)='selectModel($event)',
-            [attr.size]='modelListSize',
-            aria-label='Available upstream model IDs'
-        )
-            option(*ngFor='let modelId of availableModels', [value]='modelId', [title]='modelId') {{ modelId }}
-        .model-picker-summary(*ngIf='!loadingModels && availableModels.length')
-            | {{ availableModels.length }} model(s)
-        .model-picker-message(
-            *ngIf='!loadingModels && modelListResult && !modelListResult.success',
-            class='model-picker-error'
-        ) {{ modelListResult.message }}
-        .model-picker-message(
-            *ngIf='!loadingModels && modelListResult && modelListResult.success && !availableModels.length'
-        ) No models were returned by /models.
-
-    .form-line
-        .header
-            .title Temperature
-        input.form-control(type='number', min='0', max='2', step='0.1', [(ngModel)]='model.llm.temperature', (ngModelChange)='markChanged()')
-
-    .form-line
-        .header
-            .title Request timeout (milliseconds)
-        input.form-control(type='number', min='1000', step='1000', [(ngModel)]='model.llm.timeout', (ngModelChange)='markChanged()')
-
-    .form-line
-        .header
-            .title Maximum concurrent agents
-        input.form-control(type='number', min='1', step='1', [(ngModel)]='model.agent.maxConcurrentRuns', (ngModelChange)='markChanged()')
-
-    .d-flex.gap-2
         .form-line
-            label 强制发送 Agent 快捷键
-            input.form-control(type='text', [(ngModel)]='model.inputDetection.forceAgentShortcut', (ngModelChange)='markChanged()', placeholder='Shift+Enter')
+            .header
+                .title Temperature
+            input.form-control(type='number', min='0', max='2', step='0.1', [(ngModel)]='model.llm.temperature', (ngModelChange)='markChanged()')
+
         .form-line
-            label 强制发送 Shell 快捷键
-            input.form-control(type='text', [(ngModel)]='model.inputDetection.forceShellShortcut', (ngModelChange)='markChanged()', placeholder='Ctrl+Enter')
-    .d-flex.gap-2
-        button.btn.btn-outline-primary(
-            (click)='testConnection()',
-            [disabled]='testing || !model.llm.baseURL || !model.llm.model'
-        )
-            span(*ngIf='!testing') Test connection
-            span(*ngIf='testing') Testing…
-        button.btn.btn-primary((click)='save()', [disabled]='saving')
-            span(*ngIf='!saving') Save
-            span(*ngIf='saving') Saving…
-        button.btn.btn-warning((click)='restart()', [disabled]='!restartRequired || saving') Restart Ash now
+            .header
+                .title Request timeout (milliseconds)
+            input.form-control(type='number', min='1000', step='1000', [(ngModel)]='model.llm.timeout', (ngModelChange)='markChanged()')
 
-    .alert.mt-2(
-        *ngIf='connectionResult',
-        [class.alert-success]='connectionResult.success',
-        [class.alert-danger]='!connectionResult.success'
-    ) {{ connectionResult.message }}
+        .form-line
+            .header
+                .title Maximum concurrent agents
+            input.form-control(type='number', min='1', step='1', [(ngModel)]='model.agent.maxConcurrentRuns', (ngModelChange)='markChanged()')
 
-    .mt-3.text-muted
-        | Advanced command detection, policy and redaction rules are stored in
-        code  data/tabby-ai/config.yaml
-        |  and also require a restart.
+        .form-line
+            .header
+                .title 上下文 Token 上限
+            input.form-control(type='number', min='1000', step='1000', [(ngModel)]='model.agent.maxContextTokens')
+        .form-line
+            .header
+                .title 最近终端输出行数
+            input.form-control(type='number', min='1', [(ngModel)]='model.agent.recentOutputLines')
+        button.btn.btn-outline-secondary(type='button', (click)='testConnection()', [disabled]='testing || !model.llm.baseURL || !model.llm.model') {{ testing ? '测试中…' : '测试连接' }}
+        .alert.mt-2(*ngIf='connectionResult', [class.alert-success]='connectionResult.success', [class.alert-danger]='!connectionResult.success') {{ connectionResult.message }}
+    .settings-section(*ngIf='section === "input"')
+        p.text-muted Agent 模式下，这些命令会优先识别为 Shell。每行一个命令名，多行命令仍按完整输入识别。
+        label(for='ai-shell-commands') Shell 命令列表
+        textarea#ai-shell-commands.form-control.command-list(rows='10', [(ngModel)]='shellCommands', spellcheck='false')
+        .form-line
+            .header
+                .title 强制发送 Agent 快捷键
+            input.form-control(type='text', [(ngModel)]='model.inputDetection.forceAgentShortcut', placeholder='Shift+Enter')
+        .form-line
+            .header
+                .title 强制发送 Shell 快捷键
+            input.form-control(type='text', [(ngModel)]='model.inputDetection.forceShellShortcut', placeholder='Ctrl+Enter')
+    .settings-section(*ngIf='section === "policy"')
+        label(for='ai-approval-mode') 默认执行权限
+        select#ai-approval-mode.form-select([(ngModel)]='model.policy.approvalMode')
+            option(*ngFor='let mode of permissions.modes', [value]='mode.value') {{ mode.label }}
+        ng-container(*ngFor='let mode of permissions.modes')
+            p.setting-help(*ngIf='model.policy.approvalMode === mode.value', [class.text-warning]='mode.value === "full"') {{ mode.description }}
+        .form-line
+            .header
+                .title 未匹配命令的风险
+            select.form-select([(ngModel)]='model.policy.defaultRisk', aria-label='未匹配命令的风险')
+                option(*ngFor='let risk of risks', [value]='risk.value') {{ risk.label }}
+        .rules-heading
+            label 命令规则
+            button.btn.btn-sm.btn-outline-secondary(type='button', (click)='addRule()') 添加命令
+        p.text-muted 填写命令或子命令，如 git status。规则也匹配后续参数；危险和禁止规则优先。
+        .command-rule(*ngFor='let rule of model.policy.commandRules; let i = index')
+            input.form-control(type='text', [(ngModel)]='rule.command', placeholder='例如 git status', aria-label='命令或子命令', spellcheck='false')
+            select.form-select([(ngModel)]='rule.risk', aria-label='命令风险')
+                option(*ngFor='let risk of risks', [value]='risk.value') {{ risk.label }}
+            button.btn.btn-sm.btn-link(type='button', (click)='model.policy.commandRules.splice(i, 1)', aria-label='删除命令规则', title='删除规则')
+                i.fas.fa-xmark
+        p.text-muted(*ngIf='!model.policy.commandRules.length') 暂无自定义命令，使用内置及配置文件中的规则。
+        p.setting-help 权限档位决定是否审批。以上风险标签展示“按配置执行”时的处理方式。
+    .settings-section(*ngIf='section === "redaction"')
+        label.toggle-row
+            input(type='checkbox', [(ngModel)]='model.redaction.enabled')
+            span 启用敏感信息脱敏
+        p.text-muted 在内容发送给模型和写入会话记录前替换匹配的敏感信息。
+        label.toggle-row(*ngFor='let rule of model.redaction.patterns')
+            input(type='checkbox', [ngModel]='rule.enabled !== false', (ngModelChange)='rule.enabled = $event', [disabled]='!model.redaction.enabled')
+            span {{ rule.name }}
+        p.setting-help 密码和 Token 的临时输入、占位符及本地恢复继续独立保留。
+    .command-preview(*ngIf='section === "input" || section === "policy"')
+        label(for='ai-command-preview') 试一下规则
+        .input-group
+            input#ai-command-preview.form-control(type='text', [(ngModel)]='previewCommand', placeholder='输入一条命令，不会实际执行')
+            button.btn.btn-outline-secondary(type='button', (click)='preview()') 检查
+        p.setting-help(*ngIf='previewResult', role='status') {{ previewResult }}
+        small.text-muted 预览使用通用 Shell 语法；实际执行会结合当前 Shell 检查。
+    .settings-actions
+        button.btn.btn-primary(type='button', (click)='save()', [disabled]='saving') {{ saving ? '保存中…' : '保存' }}
+        button.btn.btn-outline-secondary(type='button', (click)='restoreDefaults()', [disabled]='saving') 恢复本页默认
+        span.text-muted 保存后生效

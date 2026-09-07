@@ -27,3 +27,8 @@
 .request-reason { white-space: pre-wrap; margin-bottom: 8px; }
 textarea { font-family: monospace; resize: vertical; max-height: 160px; }
 .actions { justify-content: flex-end; margin-top: 8px; }
+.permission-select {
+    width: auto;
+    max-width: 12rem;
+    font-size: .75rem;
+}

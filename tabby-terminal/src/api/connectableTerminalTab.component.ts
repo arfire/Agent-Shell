@@ -2,7 +2,7 @@ import { marker as _ } from '@biesbjerg/ngx-translate-extract-marker'
 
 import { Injector, Component } from '@angular/core'
 
-import { first } from 'rxjs'
+import { take } from 'rxjs'
 
 import { ConnectableTerminalProfile } from './interfaces'
 import { BaseTerminalTabComponent } from './baseTerminalTab.component'
@@ -84,7 +84,7 @@ export abstract class ConnectableTerminalTabComponent<P extends ConnectableTermi
         if (!this.reconnectOffered) {
             this.reconnectOffered = true
             this.write(this.translate.instant(_('Press any key to reconnect')) + '\r\n')
-            this.input$.pipe(first()).subscribe(() => {
+            this.input$.pipe(take(1)).subscribe(() => {
                 if (!this.session?.open && this.reconnectOffered) {
                     this.reconnect()
                 }

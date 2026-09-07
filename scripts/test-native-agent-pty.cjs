@@ -18,7 +18,7 @@ async function check (kind, file, args, env = {}) {
     const shell = new ShellIntegration(() => runtime.tab.write(''))
     const input = new AIInputMiddleware(runtime, { append: async () => {} }, detector, shell, text => agent.push(text), () => {})
     const framing = new CommandFramingMiddleware()
-    const process = pty.spawn(file, args, { name: 'xterm-256color', cols: 40, rows: 12, env: { ...global.process.env, TERM: 'xterm-256color', ...env } })
+    const process = pty.spawn(file, args, { name: 'xterm-256color', cols: 40, rows: 12, useConptyDll: true, env: { ...global.process.env, TERM: 'xterm-256color', ...env } })
     const writeRemote = data => { sent.push(data.toString()); process.write(data.toString()) }
     shell.outputToSession$.subscribe(writeRemote)
     input.outputToSession$.subscribe(data => framing.feedFromTerminal(data))
@@ -67,7 +67,8 @@ async function check (kind, file, args, env = {}) {
         await wait(() => raw.includes('ASH_AFTER_UNINSTALL'), 'Shell failed after uninstall')
         console.log('PASS', kind, 'real PTY: install, local input, native output, prompt recovery, execution framing, uninstall')
     } finally {
-        process.write('exit\r'); await delay(250)
+        process.kill()
+        await delay(250)
         shell.close(); input.close(); framing.close(); terminal.xterm.dispose()
     }
 }
@@ -75,4 +76,5 @@ async function main () {
     await check('bash', 'C:\\Program Files\\Git\\bin\\bash.exe', ['--noprofile', '--norc', '-i'], { PS1: 'ASH-TEST> ' })
     await check('powershell', global.process.env.ASH_TEST_PWSH || 'pwsh.exe', ['-NoLogo', '-NoProfile'])
 }
-main().catch(error => { console.error(error); global.process.exitCode = 1 })
+// ConPTY may retain worker handles after its child shell has been terminated.
+main().then(() => global.process.exit(0)).catch(error => { console.error(error); global.process.exit(1) })

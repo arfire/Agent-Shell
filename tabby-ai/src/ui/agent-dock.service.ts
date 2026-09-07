@@ -5,12 +5,12 @@ import { AgentDockComponent } from './agent-dock.component'
 
 @Injectable({ providedIn: 'root' })
 export class AgentDockService {
-    private docks = new Map<string, ComponentRef<AgentDockComponent>>()
+    private docks = new Map<AISessionRuntime['tab'], ComponentRef<AgentDockComponent>>()
 
     constructor (private app: ApplicationRef) { }
 
     attach (runtime: AISessionRuntime): void {
-        if (this.docks.has(runtime.id)) { return }
+        if (this.docks.has(runtime.tab)) { return }
         const host = document.createElement('ash-agent-dock')
         const component = createComponent(AgentDockComponent, { hostElement: host, environmentInjector: this.app.injector })
         component.instance.runtime = runtime
@@ -18,13 +18,14 @@ export class AgentDockService {
         this.app.attachView(component.hostView)
         component.changeDetectorRef.detectChanges()
         component.onDestroy(() => host.remove())
-        this.docks.set(runtime.id, component)
+        this.docks.set(runtime.tab, component)
     }
 
     detach (sessionId: string): void {
-        const component = this.docks.get(sessionId)
+        const entry = [...this.docks.entries()].find(([, component]) => component.instance.runtime.id === sessionId)
+        const component = entry?.[1]
         if (component) {
-            this.docks.delete(sessionId)
+            this.docks.delete(entry[0])
             this.app.detachView(component.hostView)
             component.destroy()
         }

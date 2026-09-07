@@ -27,7 +27,10 @@ export interface SessionMetadata {
     createdAt: string
     updatedAt: string
     profileId?: string
+    profileName?: string
     host?: string
     user?: string
+    port?: number
+    title?: string
     nextSeq: number
 }

@@ -410,6 +410,10 @@ export class SplitTabComponent extends BaseTabComponent implements AfterViewInit
     }
 
     focus (tab: BaseTabComponent): void {
+        if (this.focusedTab === tab) {
+            tab.emitFocused()
+            return
+        }
         this.focusedTab = tab
         for (const x of this.getAllTabs()) {
             if (x !== tab) {

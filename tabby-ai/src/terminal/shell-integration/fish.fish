@@ -6,12 +6,14 @@ function __ash_return_status
 end
 function fish_prompt
     set -l ash_status $status
+    printf '\e]777;ash;__NONCE__;PWD;%s\a' (printf '%s' "$PWD" | base64 | string join '')
     printf '\e]777;ash;__NONCE__;D;%s\a\e]777;ash;__NONCE__;A\a' $ash_status
     __ash_return_status $ash_status
     __ash_saved_prompt
     printf '\e]777;ash;__NONCE__;B\a'
 end
 function __ash_preexec --on-event fish_preexec
+    printf '\e]777;ash;__NONCE__;CMD;%s\a' (printf '%s' "$argv[1]" | base64 | string join '')
     printf '\e]777;ash;__NONCE__;C\a'
 end
 function __ash_uninstall

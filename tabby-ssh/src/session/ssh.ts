@@ -126,6 +126,7 @@ export class SSHSession {
     private knownHosts: SSHKnownHostsService
     private privateKeyImporters: AutoPrivateKeyLocator[]
     private previouslyDisconnected = false
+    private destroying = false
 
     constructor (
         private injector: Injector,
@@ -845,11 +846,18 @@ export class SSHSession {
     }
 
     async destroy (): Promise<void> {
+        if (this.destroying) { return }
+        this.destroying = true
+        this.open = false
         this.logger.info('Destroying')
         this.willDestroy.next()
         this.willDestroy.complete()
         this.serviceMessage.complete()
-        this.ssh.disconnect()
+        try {
+            await this.ssh.disconnect()
+        } catch (error) {
+            this.logger.debug('SSH transport was already disconnected:', error)
+        }
     }
 
     async openShellChannel (options: { x11: boolean }): Promise<russh.Channel> {

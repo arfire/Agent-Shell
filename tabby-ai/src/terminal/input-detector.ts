@@ -1,6 +1,7 @@
 import { Injectable } from '@angular/core'
 
 import { AIConfigService } from '../config/ai-config.service'
+import { AIConfig } from '../config/config-schema'
 
 export function unwrapShellFence (input: string): string {
     const match = /^\s*```(?:bash|sh|zsh|fish|powershell|pwsh|shell)?\s*\r?\n([\s\S]*?)\r?\n```\s*$/i.exec(input)
@@ -74,7 +75,7 @@ function looksLikeNaturalLanguage (input: string): boolean {
 export class AIInputDetector {
     constructor (private configService: AIConfigService) { }
 
-    isShellCommand (input: string, shell?: string): boolean {
+    isShellCommand (input: string, shell?: string, config: AIConfig['inputDetection'] = this.configService.config.inputDetection): boolean {
         const value = unwrapShellFence(input).trim()
         if (!value) {
             return true
@@ -86,9 +87,8 @@ export class AIInputDetector {
             if (/^(?:#!|if\s|for\s|while\s|until\s|case\s|function\s)/.test(statements[0])) {
                 return true
             }
-            return statements.every(line => this.isShellCommand(line, shell))
+            return statements.every(line => this.isShellCommand(line, shell, config))
         }
-        const config = this.configService.config.inputDetection
         const firstToken = extractFirstToken(value)
         if (shell === 'powershell' && /^(?:(?:Get|Set|New|Remove|Copy|Move|Rename|Test|Write|Read|Select|Where|ForEach|Sort|Format|Out|Invoke|Import|Export|Start|Stop|Restart|Clear|Add|Update|Resolve|Join|Split|Push|Pop)-[A-Za-z][\w-]*|[A-Za-z]:\\|\.\\)/i.test(firstToken)) {
             return true

@@ -6,7 +6,7 @@ import { AISettingsTabComponent } from './components/aiSettingsTab.component'
 @Injectable()
 export class AISettingsTabProvider extends SettingsTabProvider {
     id = 'ai'
-    icon = 'sparkles'
+    icon = 'wand-magic-sparkles'
     title = 'AI'
     weight = 10
 

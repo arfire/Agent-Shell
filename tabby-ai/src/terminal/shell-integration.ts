@@ -42,6 +42,8 @@ export class ShellIntegration extends SessionMiddleware {
     readonly state = new BehaviorSubject<ShellState>('initializing')
     readonly notice = new BehaviorSubject('正在连接 Shell…')
     readonly prompt = new Subject<void>()
+    readonly command = new Subject<string>()
+    readonly commandFinished = new Subject<number>()
     readonly nonce = crypto.randomBytes(16).toString('hex')
     kind: ShellKind|null = null
     installed = false
@@ -49,6 +51,8 @@ export class ShellIntegration extends SessionMiddleware {
     ready = false
     alternateScreen = false
     localPresentation = false
+    workingDirectory: string|null = null
+    private pendingDirectory: string|null = null
     private decoder = new StringDecoder('utf8')
     private pending = ''
     private recent = ''
@@ -226,6 +230,8 @@ export class ShellIntegration extends SessionMiddleware {
         this.ready = false
         this.state.next('closed')
         this.prompt.complete()
+        this.command.complete()
+        this.commandFinished.complete()
         this.state.complete()
         this.mode.complete()
         this.notice.complete()
@@ -266,6 +272,12 @@ export class ShellIntegration extends SessionMiddleware {
         if (type === 'READY') {
             this.installed = true
             this.hidden = ''
+        } else if (type === 'PWD') {
+            const encoded = value.slice(4)
+            if (encoded.length <= 32768 && /^[A-Za-z0-9+/=\r\n]*$/.test(encoded)) {
+                const directory = Buffer.from(encoded, 'base64').toString('utf8')
+                if (directory && !/[\x00-\x1f\x7f]/.test(directory)) { this.pendingDirectory = directory }
+            }
         } else if (type === 'A') {
             this.capturingPrompt = true
             this.promptText = ''
@@ -273,8 +285,15 @@ export class ShellIntegration extends SessionMiddleware {
         } else if (type === 'B') {
             this.capturingPrompt = false
             this.promptPending = true
+        } else if (type === 'CMD') {
+            const encoded = value.slice(4)
+            if (encoded.length <= 60000 && /^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) {
+                this.command.next(Buffer.from(encoded, 'base64').toString('utf8'))
+            }
         } else if (type === 'C') {
             this.commandStarted()
+        } else if (type === 'D' && /^-?\d+$/.test(value.slice(2))) {
+            this.commandFinished.next(Number(value.slice(2)))
         } else if (type === 'U') {
             const restart = this.enableAfterUninstall
             this.installed = false
@@ -302,6 +321,7 @@ export class ShellIntegration extends SessionMiddleware {
                     this.uninstall()
                     return
                 }
+                this.workingDirectory = this.pendingDirectory
                 this.prompt.next()
                 this.state.next('prompt')
                 this.notice.next('')

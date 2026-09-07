@@ -1,9 +1,16 @@
 export type CommandRisk = 'SAFE' | 'MODIFY' | 'DANGEROUS' | 'DENY'
+export type ApprovalMode = 'configured' | 'auto' | 'full'
+
+export interface CommandRule {
+    command: string
+    risk: CommandRisk
+}
 
 export interface RedactionRule {
     name: string
     pattern: string
     replacement: string
+    enabled?: boolean
 }
 
 export interface AIConfig {
@@ -27,6 +34,8 @@ export interface AIConfig {
         forceShellShortcut?: string
     }
     policy: {
+        approvalMode?: ApprovalMode
+        commandRules?: CommandRule[]
         defaultRisk: CommandRisk
         autoApprove: string[]
         requireApproval: string[]
@@ -70,6 +79,21 @@ export function validateAIConfig (value: unknown): asserts value is AIConfig {
     if (!Array.isArray(config.inputDetection?.shellCommands) || !Array.isArray(config.inputDetection.shellPatterns)) {
         throw new Error('inputDetection command and pattern lists must be arrays')
     }
+    if (config.inputDetection.shellCommands.some(command => typeof command !== 'string' || !command.trim() || /\s/.test(command))) {
+        throw new Error('Shell 命令列表中，每行只能填写一个命令名')
+    }
+    if (config.policy.approvalMode !== undefined && !['configured', 'auto', 'full'].includes(config.policy.approvalMode)) {
+        throw new Error('执行权限档位无效')
+    }
+    if (config.policy.commandRules !== undefined) {
+        if (!Array.isArray(config.policy.commandRules)) { throw new Error('命令规则必须为列表') }
+        for (const rule of config.policy.commandRules) {
+            if (typeof rule.command !== 'string' || !/^[\w./:-]+(?:[ \t]+[\w./:-]+)*$/.test(rule.command) ||
+                !['SAFE', 'MODIFY', 'DANGEROUS', 'DENY'].includes(rule.risk)) {
+                throw new Error('请填写有效的命令或子命令，例如 git status，并选择处理方式')
+            }
+        }
+    }
     if (!['SAFE', 'MODIFY', 'DANGEROUS', 'DENY'].includes(config.policy?.defaultRisk)) {
         throw new Error('policy.defaultRisk is invalid')
     }
@@ -87,7 +111,9 @@ export function validateAIConfig (value: unknown): asserts value is AIConfig {
     if (!Array.isArray(config.redaction?.patterns)) {
         throw new Error('redaction.patterns must be an array')
     }
+    if (typeof config.redaction.enabled !== 'boolean') { throw new Error('脱敏开关必须为布尔值') }
     for (const rule of config.redaction.patterns) {
+        if (rule.enabled !== undefined && typeof rule.enabled !== 'boolean') { throw new Error('脱敏规则开关无效') }
         compilePattern(rule.pattern, `redaction.${rule.name}`)
     }
 }

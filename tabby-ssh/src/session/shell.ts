@@ -125,6 +125,10 @@ export class SSHShellSession extends BaseSession {
         return !!this.reportedCWD
     }
 
+    reportWorkingDirectory (directory: string): void {
+        this.reportedCWD = directory
+    }
+
     async getWorkingDirectory (): Promise<string|null> {
         return this.reportedCWD ?? null
     }

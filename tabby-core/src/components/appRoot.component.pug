@@ -6,9 +6,9 @@ title-bar(
 )
 
 .window.h-100.d-flex
-    profile-tree(
-        *ngIf='ready && config.store.showProfileTree',
-        [class.mac-inset]='hostApp.platform == Platform.macOS \
+    workspace-sidebar(
+        *ngIf='ready',
+        [macInset]='hostApp.platform == Platform.macOS \
         && !hostWindow.isFullscreen \
         && config.store.appearance.frame == "thin"'
     )

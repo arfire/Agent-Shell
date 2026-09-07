@@ -16,6 +16,7 @@ export class AIInputMiddleware extends SessionMiddleware {
     private paste = false
     private pasteContent = ''
     private handedOff = false
+    private awaitingPrompt = false
     private closed = false
     private anchor?: { line: number, isDisposed: boolean, dispose: () => void }
     private anchorColumn = 0
@@ -33,7 +34,10 @@ export class AIInputMiddleware extends SessionMiddleware {
     ) {
         super()
         integration.prompt.subscribe(() => {
-            this.handedOff = false
+            if (this.awaitingPrompt || this.integration.mode.value === 'shell') {
+                this.handedOff = false
+                this.awaitingPrompt = false
+            }
             this.anchor?.dispose()
             this.anchor = undefined
         })
@@ -45,6 +49,8 @@ export class AIInputMiddleware extends SessionMiddleware {
     }
 
     get hasInput (): boolean { return !!this.buffer }
+    get remoteEditing (): boolean { return this.handedOff && !this.awaitingPrompt }
+    get readlineOwned (): boolean { return this.handedOff }
 
     feedFromSession (data: Buffer): void {
         if (this.buffer && this.canCapture) {
@@ -112,8 +118,7 @@ export class AIInputMiddleware extends SessionMiddleware {
                 return
             }
             if (!this.canCapture && !this.buffer) {
-                this.sendAgent(input)
-                if (/[\r\n]/.test(input)) { this.integration.commandStarted() }
+                this.forwardReadline(input)
                 return
             }
             for (const character of input) {
@@ -163,6 +168,7 @@ export class AIInputMiddleware extends SessionMiddleware {
             this.resetInputBuffer()
         }
         this.handedOff = true
+        this.awaitingPrompt = true
     }
 
     async settled (): Promise<void> { await this.queue }
@@ -211,8 +217,7 @@ export class AIInputMiddleware extends SessionMiddleware {
         }
         if (!this.canCapture) {
             if (!this.runtime.locked) {
-                this.sendAgent(character)
-                if (character === '\r' || character === '\n') { this.integration.commandStarted() }
+                this.forwardReadline(character)
             }
             return
         }
@@ -271,8 +276,19 @@ export class AIInputMiddleware extends SessionMiddleware {
         const input = this.buffer
         this.resetInputBuffer()
         this.handedOff = true
+        this.awaitingPrompt = false
         this.integration.notice.next('Shell 已接管本轮输入；新的提示符出现后恢复自动识别')
         this.sendAgent(this.remoteText(input) + key)
+    }
+
+    private forwardReadline (input: string): void {
+        // Prompt repaint during history/completion is still the same editable line.
+        // Only a submitted/cancelled line permits local capture at the next prompt.
+        if (/[\r\n\x03]/.test(input)) {
+            this.awaitingPrompt = true
+            this.integration.commandStarted()
+        }
+        this.sendAgent(input)
     }
 
     private captureAnchor (): void {

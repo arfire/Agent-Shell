@@ -55,10 +55,6 @@ export class AITerminalDecorator extends TerminalDecorator {
         this.dock.attach(runtime)
         await this.attachMiddleware(tab)
         await this.controller.attach(tab, runtime, this.getRequestHandler(runtime))
-        // JSONL history remains available to the context builder. Recreating
-        // every historical Angular decoration at the current cursor would
-        // duplicate old blocks and make each xterm repaint progressively
-        // slower after reconnecting.
     }
 
     private async attachMiddleware (tab: SSHTabComponent): Promise<void> {
@@ -71,6 +67,15 @@ export class AITerminalDecorator extends TerminalDecorator {
             this.attachedMiddlewareStacks.add(tab.session.middleware)
         }
         await this.controller.attachMiddleware(tab, runtime, this.getRequestHandler(runtime))
+        const history = runtime.historyToRestore
+        if (history) {
+            runtime.historyToRestore = undefined
+            try {
+                await this.presenter.replay(runtime, history)
+            } catch (error) {
+                runtime.terminal.next({ ...runtime.terminal.value, notice: '历史显示未完成：' + String(error) })
+            }
+        }
     }
 
     private getRequestHandler (runtime: Awaited<ReturnType<AISessionService['attach']>>) {

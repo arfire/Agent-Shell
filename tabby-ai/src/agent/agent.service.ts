@@ -13,6 +13,7 @@ import { AgentTerminalPresenter } from '../terminal/agent-terminal-presenter'
 import { AgentContextBuilder } from './context-builder'
 import { AgentInteractionService } from './interaction.service'
 import { AgentRunQueue } from './run-queue'
+import { AgentPermissionsService, approvalAction, CommandAuthorization } from '../policy/agent-permissions.service'
 
 const TERMINAL_TOOLS: ChatTool[] = [{
     type: 'function',
@@ -81,10 +82,11 @@ export class AgentService {
         private queue: AgentRunQueue,
         private terminal: TerminalControllerService,
         private presenter: AgentTerminalPresenter,
+        private permissions: AgentPermissionsService,
     ) { }
 
     async start (runtime: AISessionRuntime, input: string, inputMiddleware: AIInputMiddleware): Promise<void> {
-        if (runtime.activeRunId) {
+        if (!!runtime.activeRunId || runtime.state.value === 'LOADING_CONTEXT') {
             return
         }
         const run: ActiveRun = {
@@ -235,14 +237,17 @@ export class AgentService {
             return JSON.stringify({ error: 'terminal_exec requires string command and reason fields' })
         }
         let command = run.sensitive.protect(argumentsValue.command.trim())
+        if (!command) { return JSON.stringify({ error: 'Command must not be empty' }) }
         const reason = run.sensitive.protect(argumentsValue.reason.trim())
-        let decision = this.policy.evaluate(command, runtime.shellKind)
-        await this.sessions.append(runtime, 'ai-command', { command, reason, risk: decision.risk }, run.id)
+        const authorization = this.permissions.snapshot(runtime)
+        let decision = this.policy.evaluate(command, runtime.shellKind, authorization.policy)
+        await this.sessions.append(runtime, 'ai-command', { command, reason, risk: decision.risk, permissionMode: authorization.mode }, run.id)
 
-        if (decision.risk === 'DENY') {
+        const action = approvalAction(decision.risk, authorization.mode)
+        if (action === 'deny') {
             return JSON.stringify({ error: 'Command denied by local policy', reason: decision.reason })
         }
-        if (decision.risk !== 'SAFE') {
+        if (action === 'ask') {
             runtime.state.next('WAITING_APPROVAL')
             const response = await this.interactions.request({
                 sessionId: runtime.id,
@@ -257,19 +262,26 @@ export class AgentService {
                 approved: response.approved,
                 originalCommand: command,
                 finalCommand: protectedEditedCommand,
+                permissionMode: authorization.mode,
             }, run.id)
             if (!response.approved) {
                 throw new UserRejectedError('User rejected the command')
             }
             const originalDecision = decision
             command = protectedEditedCommand
-            decision = this.policy.evaluate(command, runtime.shellKind)
+            if (!command) { return JSON.stringify({ error: 'Command must not be empty' }) }
+            decision = this.policy.evaluate(command, runtime.shellKind, authorization.policy)
             if (isHigherRisk(decision, originalDecision)) {
-                return this.executeReclassifiedCommand(runtime, run, command, reason, decision)
+                return this.executeReclassifiedCommand(runtime, run, command, reason, decision, authorization)
             }
+        } else {
+            await this.sessions.append(runtime, 'approval', {
+                approved: true, automatic: true, finalCommand: command,
+                permissionMode: authorization.mode, risk: decision.risk,
+            }, run.id)
         }
 
-        return this.executeApprovedCommand(runtime, run, command, reason, decision)
+        return this.executeApprovedCommand(runtime, run, command, reason, decision, authorization)
     }
 
     private async executeReclassifiedCommand (
@@ -278,6 +290,7 @@ export class AgentService {
         command: string,
         reason: string,
         decision: CommandPolicyDecision,
+        authorization: CommandAuthorization,
     ): Promise<string> {
         if (decision.risk === 'DENY') {
             return JSON.stringify({ error: 'Edited command denied by local policy', reason: decision.reason })
@@ -296,16 +309,18 @@ export class AgentService {
             originalCommand: command,
             finalCommand: protectedEditedCommand,
             reclassified: true,
+            permissionMode: authorization.mode,
             risk: decision.risk,
         }, run.id)
         if (!response.approved) {
             throw new UserRejectedError('User rejected the reclassified command')
         }
-        const finalDecision = this.policy.evaluate(protectedEditedCommand, runtime.shellKind)
+        if (!protectedEditedCommand) { return JSON.stringify({ error: 'Command must not be empty' }) }
+        const finalDecision = this.policy.evaluate(protectedEditedCommand, runtime.shellKind, authorization.policy)
         if (isHigherRisk(finalDecision, decision)) {
-            return this.executeReclassifiedCommand(runtime, run, protectedEditedCommand, reason, finalDecision)
+            return this.executeReclassifiedCommand(runtime, run, protectedEditedCommand, reason, finalDecision, authorization)
         }
-        return this.executeApprovedCommand(runtime, run, protectedEditedCommand, reason, finalDecision)
+        return this.executeApprovedCommand(runtime, run, protectedEditedCommand, reason, finalDecision, authorization)
     }
 
     private async executeApprovedCommand (
@@ -314,11 +329,12 @@ export class AgentService {
         command: string,
         reason: string,
         decision: CommandPolicyDecision,
+        authorization: CommandAuthorization,
     ): Promise<string> {
         if (this.isStopped(run)) {
             throw new DOMException('Agent stopped before command execution', 'AbortError')
         }
-        if (decision.risk === 'DENY') {
+        if (approvalAction(decision.risk, authorization.mode) === 'deny') {
             return JSON.stringify({ error: 'Command denied by local policy', reason: decision.reason })
         }
         runtime.state.next('EXECUTING')

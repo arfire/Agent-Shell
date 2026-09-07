@@ -2,6 +2,7 @@ import { Injectable } from '@angular/core'
 import * as crypto from 'crypto'
 import * as fs from 'fs'
 import * as path from 'path'
+import { Subject } from 'rxjs'
 import { LogService, Logger } from 'tabby-core'
 
 import { AIConfigService } from '../config/ai-config.service'
@@ -9,6 +10,7 @@ import { SessionEvent, SessionEventType, SessionMetadata } from './session-event
 
 @Injectable({ providedIn: 'root' })
 export class AISessionStore {
+    readonly changed = new Subject<void>()
     private readonly sessionsDirectory: string
     private readonly indexPath: string
     private readonly metadata = new Map<string, SessionMetadata>()
@@ -25,7 +27,7 @@ export class AISessionStore {
         this.ready = this.initialize()
     }
 
-    async createSession (details: Pick<SessionMetadata, 'profileId'|'host'|'user'> = {}): Promise<string> {
+    async createSession (details: Pick<SessionMetadata, 'profileId'|'profileName'|'host'|'user'|'port'> = {}): Promise<string> {
         await this.ready
         const now = new Date().toISOString()
         const id = crypto.randomUUID()
@@ -37,10 +39,11 @@ export class AISessionStore {
             ...details,
         })
         await this.saveIndex()
+        this.changed.next()
         return id
     }
 
-    async ensureSession (id: string, details: Pick<SessionMetadata, 'profileId'|'host'|'user'> = {}): Promise<string> {
+    async ensureSession (id: string, details: Pick<SessionMetadata, 'profileId'|'profileName'|'host'|'user'|'port'> = {}): Promise<string> {
         await this.ready
         if (!this.metadata.has(id)) {
             const now = new Date().toISOString()
@@ -71,6 +74,9 @@ export class AISessionStore {
             data,
         }
         metadata.updatedAt = event.time
+        if (type === 'user-ai-input' && !metadata.title) {
+            metadata.title = String((data as { content?: unknown }).content ?? '').replace(/\s+/g, ' ').slice(0, 80)
+        }
 
         const previous = this.writes.get(sessionId) ?? Promise.resolve()
         const write = previous.then(async () => {
@@ -82,11 +88,38 @@ export class AISessionStore {
         })
         this.writes.set(sessionId, write)
         await write
+        if (type !== 'ssh-output' && type !== 'ssh-input') { this.changed.next() }
         return event
+    }
+
+    async list (): Promise<SessionMetadata[]> {
+        await this.ready
+        return [...this.metadata.values()].map(entry => ({ ...entry })).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    }
+
+    async rename (sessionId: string, title: string): Promise<void> {
+        await this.ready
+        const entry = this.metadata.get(sessionId)
+        if (!entry) { throw new Error('会话记录不存在') }
+        const name = title.replace(/[\x00-\x1f\x7f-\x9f]/g, '').trim().slice(0, 80)
+        if (!name) { throw new Error('请输入会话名称') }
+        entry.title = name
+        await this.saveIndex()
+        this.changed.next()
+    }
+
+    async associate (sessionId: string, details: Pick<SessionMetadata, 'profileId'|'profileName'|'host'|'user'|'port'>): Promise<void> {
+        await this.ready
+        const entry = this.metadata.get(sessionId)
+        if (!entry) { throw new Error('会话记录不存在') }
+        Object.assign(entry, details)
+        await this.saveIndex()
+        this.changed.next()
     }
 
     async read (sessionId: string, limit?: number): Promise<SessionEvent[]> {
         await this.ready
+        await this.writes.get(sessionId)
         const sessionPath = this.getSessionPath(sessionId)
         if (!fs.existsSync(sessionPath)) {
             return []
@@ -154,6 +187,7 @@ export class AISessionStore {
     }
 
     private getSessionPath (sessionId: string): string {
+        if (!/^[a-zA-Z0-9_-]+$/.test(sessionId)) { throw new Error('Invalid session ID') }
         return path.join(this.sessionsDirectory, `${sessionId}.jsonl`)
     }
 
