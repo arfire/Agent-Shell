@@ -5,9 +5,9 @@ import { AIConfig, ApprovalMode, CommandRisk } from '../config/config-schema'
 import { AISessionRuntime } from '../session/ai-session.service'
 
 export const APPROVAL_MODES: { value: ApprovalMode, label: string, description: string }[] = [
-    { value: 'configured', label: '按配置执行', description: '遵循配置中的自动执行、审批、危险和禁止规则。' },
-    { value: 'auto', label: '自动审批', description: '安全和修改类命令自动执行；危险命令仍需确认，禁止命令仍会拦截。' },
-    { value: 'full', label: '完全放行', description: '所有 Agent 命令自动执行，包括危险和禁止类命令。仍受 SSH 用户权限限制。' },
+    { value: 'configured', label: '按配置执行', description: '只读查询可自动执行；修改逐条审批，危险操作二次确认，禁止规则始终生效。' },
+    { value: 'auto', label: '只读自动', description: '仅经本地确认的只读状态查询可自动执行；修改和未知命令仍需逐条审批。' },
+    { value: 'full', label: '逐条确认（原完全放行）', description: '旧完全放行模式已收紧：所有命令逐条确认，危险操作二次确认，禁止规则不能绕过。' },
 ]
 
 export interface CommandAuthorization {
@@ -16,9 +16,8 @@ export interface CommandAuthorization {
 }
 
 export function approvalAction (risk: CommandRisk, mode: ApprovalMode): 'execute'|'ask'|'deny' {
-    if (mode === 'full') { return 'execute' }
     if (risk === 'DENY') { return 'deny' }
-    if (risk === 'SAFE' || mode === 'auto' && risk === 'MODIFY') { return 'execute' }
+    if (risk === 'SAFE' && mode !== 'full') { return 'execute' }
     return 'ask'
 }
 
@@ -46,9 +45,9 @@ export class AgentPermissionsService {
     private async confirmFullAccess (): Promise<boolean> {
         const result = await this.platform.showMessageBox({
             type: 'warning',
-            message: '开启完全放行？',
-            detail: 'Agent 将自动执行所有命令，包括危险命令和配置中禁止的命令。脱敏、执行记录和停止功能继续保留。',
-            buttons: ['取消', '开启完全放行'],
+            message: '切换为逐条确认？',
+            detail: '旧完全放行已停用。每条 Agent 命令都需要你确认，危险操作需要两次确认，禁止命令不会执行。',
+            buttons: ['取消', '逐条确认'],
             defaultId: 0,
             cancelId: 0,
         })

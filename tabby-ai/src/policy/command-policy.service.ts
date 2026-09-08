@@ -2,6 +2,8 @@ import { Injectable } from '@angular/core'
 
 import { AIConfigService } from '../config/ai-config.service'
 import { AIConfig, CommandRisk } from '../config/config-schema'
+import { credentialAccessReason } from './credential-guard'
+import { executionBoundary } from './execution-boundary'
 
 export interface CommandPolicyDecision {
     risk: CommandRisk
@@ -23,6 +25,8 @@ export class CommandPolicyService {
 
     evaluate (command: string, shell?: string, policy: AIConfig['policy'] = this.configService.config.policy): CommandPolicyDecision {
         const commands = splitShellCommands(command)
+        const credentialError = credentialAccessReason(command)
+        if (credentialError) { return { risk: 'DENY', reason: credentialError, commands } }
         let result: CommandPolicyDecision = {
             risk: 'SAFE',
             reason: 'Every command segment matched an automatic approval rule.',
@@ -43,6 +47,10 @@ export class CommandPolicyService {
         // or Fish command substitutions. Keep deny rules and require two approvals.
         if (result.risk !== 'DENY' && (shell === 'powershell' || shell === 'fish' && /[()]/.test(command))) {
             result = { ...result, risk: 'DANGEROUS', reason: 'This shell syntax requires explicit review and two confirmations.' }
+        }
+        const boundary = executionBoundary(command)
+        if (RISK_WEIGHT[boundary.risk] > RISK_WEIGHT[result.risk]) {
+            result = { ...result, ...boundary }
         }
         return result
     }

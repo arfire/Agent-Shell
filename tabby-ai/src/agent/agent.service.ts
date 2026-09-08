@@ -14,6 +14,7 @@ import { AgentContextBuilder } from './context-builder'
 import { AgentInteractionService } from './interaction.service'
 import { AgentRunQueue } from './run-queue'
 import { AgentPermissionsService, approvalAction, CommandAuthorization } from '../policy/agent-permissions.service'
+import { credentialAccessReason } from '../policy/credential-guard'
 
 const TERMINAL_TOOLS: ChatTool[] = [{
     type: 'function',
@@ -221,6 +222,7 @@ export class AgentService {
     }
 
     private async executeTool (runtime: AISessionRuntime, run: ActiveRun, toolCall: ToolCall): Promise<string> {
+        if (this.isStopped(run)) { throw new DOMException('Agent stopped', 'AbortError') }
         if (toolCall.function.name === 'request_user_input') {
             return this.requestUserInput(runtime, run, toolCall)
         }
@@ -236,11 +238,17 @@ export class AgentService {
         if (typeof argumentsValue.command !== 'string' || typeof argumentsValue.reason !== 'string') {
             return JSON.stringify({ error: 'terminal_exec requires string command and reason fields' })
         }
+        const credentialError = credentialAccessReason(argumentsValue.command)
+        if (credentialError) {
+            await this.sessions.append(runtime, 'error', { message: credentialError, source: 'credential-guard' }, run.id)
+            return JSON.stringify({ error: credentialError })
+        }
         let command = run.sensitive.protect(argumentsValue.command.trim())
         if (!command) { return JSON.stringify({ error: 'Command must not be empty' }) }
         const reason = run.sensitive.protect(argumentsValue.reason.trim())
         const authorization = this.permissions.snapshot(runtime)
         let decision = this.policy.evaluate(command, runtime.shellKind, authorization.policy)
+        let approvedCommand: string|undefined = undefined
         await this.sessions.append(runtime, 'ai-command', { command, reason, risk: decision.risk, permissionMode: authorization.mode }, run.id)
 
         const action = approvalAction(decision.risk, authorization.mode)
@@ -251,12 +259,17 @@ export class AgentService {
             runtime.state.next('WAITING_APPROVAL')
             const response = await this.interactions.request({
                 sessionId: runtime.id,
+                connectionId: runtime.connectionId,
                 runId: run.id,
                 command,
                 reason: `${reason}\nPolicy: ${decision.reason}`,
                 risk: decision.risk,
                 confirmationsRequired: decision.risk === 'DANGEROUS' ? 2 : 1,
             })
+            if (response.approved) {
+                const editedError = credentialAccessReason(response.command)
+                if (editedError) { return JSON.stringify({ error: editedError }) }
+            }
             const protectedEditedCommand = run.sensitive.protect(response.command.trim())
             await this.sessions.append(runtime, 'approval', {
                 approved: response.approved,
@@ -265,7 +278,7 @@ export class AgentService {
                 permissionMode: authorization.mode,
             }, run.id)
             if (!response.approved) {
-                throw new UserRejectedError('User rejected the command')
+                return JSON.stringify({ status: 'rejected', executed: false, message: '用户拒绝了这条命令。请继续分析并说明可行的下一步，不要改写或换工具重试被拒绝的操作。' })
             }
             const originalDecision = decision
             command = protectedEditedCommand
@@ -274,6 +287,7 @@ export class AgentService {
             if (isHigherRisk(decision, originalDecision)) {
                 return this.executeReclassifiedCommand(runtime, run, command, reason, decision, authorization)
             }
+            approvedCommand = command
         } else {
             await this.sessions.append(runtime, 'approval', {
                 approved: true, automatic: true, finalCommand: command,
@@ -281,7 +295,7 @@ export class AgentService {
             }, run.id)
         }
 
-        return this.executeApprovedCommand(runtime, run, command, reason, decision, authorization)
+        return this.executeApprovedCommand(runtime, run, command, reason, decision, authorization, approvedCommand)
     }
 
     private async executeReclassifiedCommand (
@@ -297,12 +311,17 @@ export class AgentService {
         }
         const response = await this.interactions.request({
             sessionId: runtime.id,
+            connectionId: runtime.connectionId,
             runId: run.id,
             command,
             reason: `Edited command was reclassified: ${decision.reason}`,
             risk: decision.risk,
             confirmationsRequired: decision.risk === 'DANGEROUS' ? 2 : 1,
         })
+        if (response.approved) {
+            const editedError = credentialAccessReason(response.command)
+            if (editedError) { return JSON.stringify({ error: editedError }) }
+        }
         const protectedEditedCommand = run.sensitive.protect(response.command.trim())
         await this.sessions.append(runtime, 'approval', {
             approved: response.approved,
@@ -313,14 +332,14 @@ export class AgentService {
             risk: decision.risk,
         }, run.id)
         if (!response.approved) {
-            throw new UserRejectedError('User rejected the reclassified command')
+            return JSON.stringify({ status: 'rejected', executed: false, message: '用户拒绝了修改后的命令。请继续分析，不要重试被拒绝的操作。' })
         }
         if (!protectedEditedCommand) { return JSON.stringify({ error: 'Command must not be empty' }) }
         const finalDecision = this.policy.evaluate(protectedEditedCommand, runtime.shellKind, authorization.policy)
         if (isHigherRisk(finalDecision, decision)) {
             return this.executeReclassifiedCommand(runtime, run, protectedEditedCommand, reason, finalDecision, authorization)
         }
-        return this.executeApprovedCommand(runtime, run, protectedEditedCommand, reason, finalDecision, authorization)
+        return this.executeApprovedCommand(runtime, run, protectedEditedCommand, reason, finalDecision, authorization, protectedEditedCommand)
     }
 
     private async executeApprovedCommand (
@@ -330,21 +349,39 @@ export class AgentService {
         reason: string,
         decision: CommandPolicyDecision,
         authorization: CommandAuthorization,
+        approvedCommand?: string,
     ): Promise<string> {
-        if (this.isStopped(run)) {
+        // Recheck after approval edits, even in full access mode. Do not inspect
+        // restored values: only locally supplied placeholders may carry secrets.
+        const credentialError = credentialAccessReason(command)
+        if (credentialError) { return JSON.stringify({ error: credentialError }) }
+        if (this.isStopped(run) || runtime.tab.session !== run.session) {
             throw new DOMException('Agent stopped before command execution', 'AbortError')
         }
-        if (approvalAction(decision.risk, authorization.mode) === 'deny') {
+        const rechecked = this.policy.evaluate(command, runtime.shellKind, authorization.policy)
+        const current = this.policy.evaluate(command, runtime.shellKind)
+        if (isHigherRisk(rechecked, decision)) { decision = rechecked }
+        if (isHigherRisk(current, decision)) {
+            return JSON.stringify({ error: '执行规则已收紧，请重新提交命令审批' })
+        }
+        const action = approvalAction(decision.risk, authorization.mode)
+        if (action === 'deny') {
             return JSON.stringify({ error: 'Command denied by local policy', reason: decision.reason })
+        }
+        if (action === 'ask' && approvedCommand !== command) {
+            return JSON.stringify({ error: '本条命令尚未获得用户审批，不能执行' })
         }
         runtime.state.next('EXECUTING')
         await this.sessions.append(runtime, 'ssh-input', { content: command, source: 'ai', reason }, run.id)
         await this.presenter.interrupt(run.id)
         try {
-            const executableCommand = run.sensitive.restore(command)
+            let executableCommand = ''
+            try { executableCommand = run.sensitive.restoreCommand(command, runtime.shellKind) } catch (error) {
+                return JSON.stringify({ error: getErrorMessage(error) })
+            }
             const result = await this.terminal.execute(runtime, executableCommand, (prompt, kind) =>
                 this.handleInteractivePrompt(runtime, run, prompt, kind), run.controller.signal,
-            run.sensitive.streamFilter())
+            run.sensitive.streamFilter(true))
             await this.sessions.append(runtime, 'command-result', { exitCode: result.exitCode, handedOff: run.stopRequested }, run.id)
             runtime.state.next('OBSERVING')
             if (run.stopRequested) {
@@ -371,6 +408,7 @@ export class AgentService {
         runtime.state.next('WAITING_INTERACTION')
         const form = await this.interactions.requestForm({
             sessionId: runtime.id,
+            connectionId: runtime.connectionId,
             runId: run.id,
             prompt: argumentsValue.prompt,
             kind: argumentsValue.kind === 'secret' ? 'password' : 'text',
@@ -405,42 +443,24 @@ export class AgentService {
     ): Promise<string|null> {
         runtime.state.next('WAITING_INTERACTION')
         let value: string|null = null
-        if (kind === 'yes-no') {
-            const response = await this.client.stream([
-                {
-                    role: 'system',
-                    content: 'Choose the response to the interactive Linux command prompt from the user goal. Reply with exactly y or n and nothing else.',
-                },
-                {
-                    role: 'user',
-                    content: run.sensitive.protect(`Goal: ${run.goal}\nPrompt: ${prompt}`),
-                },
-            ], [], {}, run.controller.signal)
-            const answer = response.content.trim().toLowerCase()
-            if (answer === 'y' || answer === 'yes') {
-                value = 'y'
-            } else if (answer === 'n' || answer === 'no') {
-                value = 'n'
-            }
-        }
-        if (value === null) {
-            await this.presenter.open(runtime, run.id, () => this.stop(runtime), this.nextEventSeq(runtime))
-            try {
-                const form = await this.interactions.requestForm({
-                    sessionId: runtime.id,
-                    runId: run.id,
-                    prompt,
-                    kind: kind === 'password' ? 'password' : 'text',
-                })
-                if (form.submitted) {
-                    value = form.value
-                    if (kind === 'password') {
-                        run.sensitive.register(value)
-                    }
+        // Remote confirmation prompts are user decisions, never model decisions.
+        await this.presenter.open(runtime, run.id, () => this.stop(runtime), this.nextEventSeq(runtime))
+        try {
+            const form = await this.interactions.requestForm({
+                sessionId: runtime.id,
+                connectionId: runtime.connectionId,
+                runId: run.id,
+                prompt: run.sensitive.protect(prompt),
+                kind: kind === 'password' ? 'password' : 'text',
+            })
+            if (form.submitted) {
+                value = form.value
+                if (kind === 'password') {
+                    run.sensitive.register(value)
                 }
-            } finally {
-                await this.presenter.interrupt(run.id)
             }
+        } finally {
+            await this.presenter.interrupt(run.id)
         }
         if (value !== null) {
             await this.sessions.append(runtime, 'interaction', {

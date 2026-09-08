@@ -10,6 +10,10 @@
         span.agent-status(*ngIf='runtime.activeRunId && runtime.terminal.value.mode === "agent"') {{ statusLabel }}
         button.btn.btn-sm.btn-link.stop-button(*ngIf='runtime.activeRunId && runtime.terminal.value.mode === "agent"', type='button', (click)='runtime.stopAgent?.()') 停止 Agent
     .notice(*ngIf='runtime.terminal.value.notice', role='status') {{ runtime.terminal.value.notice }}
+    ng-container(*ngIf='store.persistence | async as saving')
+        .notice.text-warning(*ngIf='saving.error', role='alert')
+            span {{saving.error}}。{{saving.pending ? '还有 ' + saving.pending + ' 条记录仅保存在内存中，退出程序可能丢失。' : '会话列表尚未保存。'}} 正在自动重试。
+            button.btn.btn-sm.btn-link(type='button', (click)='store.retrySaving()') 立即重试
     .interaction-area(*ngIf='requests.length || forms.length')
         .interaction(*ngFor='let request of requests')
             .request-reason {{ request.reason }}

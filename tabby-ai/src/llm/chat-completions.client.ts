@@ -40,6 +40,12 @@ export interface ChatCompletionResult {
     finishReason: string|null
 }
 
+export class AIRequestError extends Error {
+    constructor (public status: number, detail: string) {
+        super(`AI request failed (${status}): ${detail.slice(0, 500)}`)
+    }
+}
+
 export interface ConnectionTestResult {
     model: string
     content: string
@@ -54,11 +60,13 @@ export class ChatCompletionsClient {
         tools: ChatTool[],
         handlers: StreamHandlers,
         signal?: AbortSignal,
+        settings?: AIConfig['llm'],
     ): Promise<ChatCompletionResult> {
-        const config = this.configService.config.llm
+        const config = settings ?? this.configService.config.llm
         if (!config.model) {
             throw new Error('No AI model is configured')
         }
+        signal?.throwIfAborted()
         const controller = new AbortController()
         const timeout = setTimeout(() => controller.abort(new Error('AI request timed out')), config.timeout)
         const abort = () => controller.abort(signal?.reason)
@@ -68,12 +76,12 @@ export class ChatCompletionsClient {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
+                    ...config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {},
                 },
                 body: JSON.stringify({
                     model: config.model,
                     messages,
-                    ...(tools.length ? { tools, tool_choice: 'auto' } : {}),
+                    ...tools.length ? { tools, tool_choice: 'auto' } : {},
                     temperature: config.temperature,
                     stream: true,
                 }),
@@ -81,7 +89,11 @@ export class ChatCompletionsClient {
             })
             if (!response.ok) {
                 const detail = await response.text()
-                throw new Error(`AI request failed (${response.status}): ${detail.slice(0, 1000)}`)
+                throw new AIRequestError(response.status, detail)
+            }
+            const contentType = response.headers.get('content-type')
+            if (contentType && !/^text\/event-stream\b/i.test(contentType)) {
+                throw new Error('接口未返回 SSE 流式回答，请检查模型服务的流式支持')
             }
             if (!response.body) {
                 throw new Error('AI response did not contain a stream')
@@ -100,6 +112,7 @@ export class ChatCompletionsClient {
         if (!settings.model) {
             throw new Error('Model is required')
         }
+        signal?.throwIfAborted()
         const controller = new AbortController()
         const timeout = setTimeout(() => controller.abort(new Error('Connection test timed out')), settings.timeout)
         const abort = () => controller.abort(signal?.reason)
@@ -109,19 +122,18 @@ export class ChatCompletionsClient {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    ...(settings.apiKey ? { Authorization: `Bearer ${settings.apiKey}` } : {}),
+                    ...settings.apiKey ? { Authorization: `Bearer ${settings.apiKey}` } : {},
                 },
                 body: JSON.stringify({
                     model: settings.model,
                     messages: [{ role: 'user', content: 'Reply with OK.' }],
-                    temperature: 0,
+                    temperature: settings.temperature,
                     stream: false,
-                    max_tokens: 8,
                 }),
                 signal: controller.signal,
             })
             if (!response.ok) {
-                throw new Error(`Connection test failed (${response.status}): ${(await response.text()).slice(0, 500)}`)
+                throw new AIRequestError(response.status, await response.text())
             }
             const data = await response.json()
             const choice = data?.choices?.[0]
@@ -142,6 +154,7 @@ export class ChatCompletionsClient {
         if (!settings.baseURL.trim()) {
             throw new Error('API Base URL is required')
         }
+        signal?.throwIfAborted()
         const controller = new AbortController()
         const timeout = setTimeout(() => controller.abort(new Error('Model list request timed out')), settings.timeout)
         const abort = () => controller.abort(signal?.reason)
@@ -183,54 +196,62 @@ export class ChatCompletionsClient {
         const decoder = new TextDecoder()
         const toolCalls = new Map<number, ToolCall>()
         let pending = ''
+        let eventData: string[] = []
         let content = ''
-        let finishReason: string|null = null
-
-        while (true) {
-            const { done, value } = await reader.read()
-            pending += decoder.decode(value, { stream: !done })
-            const lines = pending.split(/\r?\n/)
-            pending = lines.pop() ?? ''
-            for (const line of lines) {
-                if (!line.startsWith('data:')) {
-                    continue
-                }
-                const data = line.substring(5).trim()
-                if (!data || data === '[DONE]') {
-                    continue
-                }
-                const chunk = JSON.parse(data)
-                const choice = chunk.choices?.[0]
-                if (!choice) {
-                    continue
-                }
-                finishReason = choice.finish_reason ?? finishReason
-                const delta = choice.delta ?? {}
-                if (delta.content) {
-                    content += delta.content
-                    handlers.onText?.(delta.content)
-                }
-                for (const item of delta.tool_calls ?? []) {
-                    const index = item.index ?? 0
-                    const current = toolCalls.get(index) ?? {
-                        id: '',
-                        type: 'function' as const,
-                        function: { name: '', arguments: '' },
-                    }
-                    current.id += item.id ?? ''
-                    current.function.name += item.function?.name ?? ''
-                    current.function.arguments += item.function?.arguments ?? ''
-                    toolCalls.set(index, current)
-                    handlers.onToolCallDelta?.({
-                        ...current,
-                        function: { ...current.function },
-                    })
-                }
+        const state: { finishReason: string|null, completed: boolean } = { finishReason: null, completed: false }
+        const isComplete = (): boolean => state.completed
+        const event = (): void => {
+            const data = eventData.join('\n').trim()
+            eventData = []
+            if (!data) { return }
+            if (data === '[DONE]') { state.completed = true; return }
+            let chunk: any = null
+            try { chunk = JSON.parse(data) } catch { throw new Error('模型返回的流式数据不是有效 JSON') }
+            if (chunk?.error) { throw new Error('模型在流式回答中返回错误，请检查服务端状态或参数兼容性') }
+            const choice = chunk?.choices?.[0]
+            if (!choice) { return }
+            state.finishReason = choice.finish_reason ?? state.finishReason
+            const delta = choice.delta ?? {}
+            if (typeof delta.content === 'string' && delta.content) {
+                content += delta.content
+                handlers.onText?.(delta.content)
             }
-            if (done) {
-                break
+            for (const item of delta.tool_calls ?? []) {
+                const index = item.index ?? 0
+                const current = toolCalls.get(index) ?? { id: '', type: 'function' as const, 'function': { name: '', arguments: '' } }
+                current.id += item.id ?? ''
+                current.function.name += item.function?.name ?? ''
+                current.function.arguments += item.function?.arguments ?? ''
+                toolCalls.set(index, current)
+                handlers.onToolCallDelta?.({ ...current, 'function': { ...current.function } })
             }
         }
-        return { content, toolCalls: [...toolCalls.values()], finishReason }
+        const line = (value: string): void => {
+            if (!value) { event() } else if (value.startsWith('data:')) { eventData.push(value.slice(5).replace(/^ /, '')) }
+        }
+        try {
+            while (!state.completed) {
+                const { done, value } = await reader.read()
+                pending += decoder.decode(value, { stream: !done })
+                const lines = pending.split(/\r?\n/)
+                pending = lines.pop() ?? ''
+                for (const textLine of lines) {
+                    line(textLine)
+                    // The line handler can receive [DONE] and update state.
+                    if (isComplete()) { break }
+                }
+                if (done) {
+                    if (pending) { line(pending) }
+                    event()
+                    break
+                }
+            }
+            if (!state.completed && !state.finishReason) { throw new Error('模型回答意外中断，未收到结束标记，请重试') }
+            if (!content && !toolCalls.size) { throw new Error('接口没有返回文字或工具调用，请检查协议和模型名称') }
+            return { content, toolCalls: [...toolCalls.values()], finishReason: state.finishReason }
+        } finally {
+            await reader.cancel().catch(() => undefined)
+            reader.releaseLock()
+        }
     }
 }

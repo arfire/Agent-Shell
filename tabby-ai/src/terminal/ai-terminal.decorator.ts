@@ -41,7 +41,7 @@ export class AITerminalDecorator extends TerminalDecorator {
             const runtime = this.sessions.get(terminal)
             if (runtime) {
                 runtime.stopAgent?.()
-                this.dock.detach(runtime.id)
+                this.dock.detach(terminal)
                 this.presenter.detachSession(runtime.id)
             }
             this.controller.detach(terminal)

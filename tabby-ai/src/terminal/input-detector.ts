@@ -80,9 +80,13 @@ export class AIInputDetector {
         if (!value) {
             return true
         }
+        // A command name can be the topic of a question, not the executable.
+        // Keep quoted arguments and normal commands such as `echo 中文` intact.
+        if (/^\S+\s+(?:为什么|怎么|如何|帮我|请帮|能不能|是否|有什么|出了什么|why\b|how\b|please\b|can you\b)/i.test(value) &&
+            !/^(?:echo|printf|grep|rg|findstr)\s/i.test(value)) { return false }
         if (/[\r\n]/.test(value)) {
             const statements = shellStatementLines(value)
-            if (!statements.length) { return true }
+            if (!statements.length) { return !looksLikeNaturalLanguage(value) }
             // A script with a declared interpreter or compound shell structure is one unit.
             if (/^(?:#!|if\s|for\s|while\s|until\s|case\s|function\s)/.test(statements[0])) {
                 return true

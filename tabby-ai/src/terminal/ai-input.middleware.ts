@@ -11,6 +11,7 @@ export type InputRoute = 'auto'|'shell'|'agent'
 /** Local drafts occupy xterm cells, never a second DOM input or the remote PTY. */
 export class AIInputMiddleware extends SessionMiddleware {
     private buffer = ''
+    private cursor = 0
     private decoder = new StringDecoder('utf8')
     private escape = ''
     private paste = false
@@ -38,8 +39,10 @@ export class AIInputMiddleware extends SessionMiddleware {
                 this.handedOff = false
                 this.awaitingPrompt = false
             }
-            this.anchor?.dispose()
-            this.anchor = undefined
+            if (!this.buffer) {
+                this.anchor?.dispose()
+                this.anchor = undefined
+            }
         })
     }
 
@@ -55,10 +58,15 @@ export class AIInputMiddleware extends SessionMiddleware {
     feedFromSession (data: Buffer): void {
         if (this.buffer && this.canCapture) {
             this.enqueue(async () => {
+                if (!this.buffer || !this.canCapture) {
+                    this.outputToTerminal.next(data)
+                    return
+                }
                 await this.erase()
                 this.outputToTerminal.next(data)
-                await this.runtime.tab.write('')
+                await this.flushTerminal()
                 await this.runtime.tab.write('\r\n' + this.integration.promptText)
+                await this.flushTerminal()
                 this.anchor?.dispose()
                 this.anchor = undefined
                 this.captureAnchor()
@@ -111,9 +119,9 @@ export class AIInputMiddleware extends SessionMiddleware {
                 return
             }
             if (this.canCapture && !this.escape && !this.paste && /^[^\x00-\x1f\x7f-\x9f]+$/.test(input)) {
-                await this.runtime.tab.write('')
+                await this.flushTerminal()
                 this.captureAnchor()
-                this.buffer += input
+                this.insert(input)
                 await this.paint()
                 return
             }
@@ -137,9 +145,9 @@ export class AIInputMiddleware extends SessionMiddleware {
         if (!this.canCapture) { return false }
         this.enqueue(async () => {
             if (!this.canCapture) { this.onBlockedInput(); return }
-            await this.runtime.tab.write('')
+            await this.flushTerminal()
             this.captureAnchor()
-            this.buffer += text.replace(/\r\n?/g, '\n').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, '')
+            this.insert(text.replace(/\r\n?/g, '\n').replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ''))
             await this.paint()
         })
         return true
@@ -153,6 +161,7 @@ export class AIInputMiddleware extends SessionMiddleware {
 
     resetInputBuffer (): void {
         this.buffer = ''
+        this.cursor = 0
         this.escape = ''
         this.paste = false
         this.pasteContent = ''
@@ -171,7 +180,7 @@ export class AIInputMiddleware extends SessionMiddleware {
         this.awaitingPrompt = true
     }
 
-    async settled (): Promise<void> { await this.queue }
+    async settled (): Promise<void> { await this.queue; await this.flushTerminal() }
 
     close (): void {
         this.closed = true
@@ -189,6 +198,10 @@ export class AIInputMiddleware extends SessionMiddleware {
     }
 
     private async character (character: string): Promise<void> {
+        if (this.integration.mode.value === 'agent' && this.integration.state.value === 'prompt' &&
+            !this.integration.ready && !this.handedOff && !this.runtime.locked) {
+            await this.integration.waitForPrompt()
+        }
         if (this.escape) {
             this.escape += character
             if (!/^\x1b(?:\[[0-?]*[ -/]*[@-~]|O.|[^\[O])$/.test(this.escape) && this.escape.length < 64) { return }
@@ -200,11 +213,11 @@ export class AIInputMiddleware extends SessionMiddleware {
             } else if (sequence === '\x1b[201~' && this.paste) {
                 this.paste = false
                 this.captureAnchor()
-                this.buffer += this.pasteContent.replace(/\r\n?/g, '\n')
+                this.insert(this.pasteContent.replace(/\r\n?/g, '\n'))
                 this.pasteContent = ''
                 await this.paint()
             } else if (!this.paste) {
-                await this.giveToReadline(sequence)
+                await this.editKey(sequence)
             }
             return
         }
@@ -229,21 +242,24 @@ export class AIInputMiddleware extends SessionMiddleware {
             this.integration.commandStarted()
             this.sendAgent(character)
         } else if (character === '\x7f' || character === '\x08') {
-            const characters = [...this.buffer]
-            characters.pop()
-            this.buffer = characters.join('')
+            const previous = this.previousCharacter()
+            this.buffer = this.buffer.slice(0, previous) + this.buffer.slice(this.cursor)
+            this.cursor = previous
             await this.paint()
         } else if (character === '\x15') {
-            this.buffer = ''
+            this.buffer = this.buffer.slice(this.cursor)
+            this.cursor = 0
             await this.paint()
         } else if (character === '\x17') {
-            this.buffer = this.buffer.replace(/\s*\S+\s*$/, '')
+            const prefix = this.buffer.slice(0, this.cursor).replace(/\s*\S+\s*$/, '')
+            this.buffer = prefix + this.buffer.slice(this.cursor)
+            this.cursor = prefix.length
             await this.paint()
         } else if (character.codePointAt(0)! < 32) {
-            await this.giveToReadline(character)
+            await this.editKey(character)
         } else {
             this.captureAnchor()
-            this.buffer += character
+            this.insert(character)
             await this.paint()
         }
     }
@@ -259,6 +275,8 @@ export class AIInputMiddleware extends SessionMiddleware {
             void this.sessions.append(this.runtime, 'ssh-input', { content: input, source: 'user' })
             this.sendAgent(this.remoteText(route === 'auto' ? unwrapShellFence(input) : input) + '\r')
         } else {
+            this.cursor = this.buffer.length
+            await this.paint()
             this.resetInputBuffer()
             this.runtime.locked = true
             await this.runtime.tab.write('\r\n')
@@ -269,6 +287,69 @@ export class AIInputMiddleware extends SessionMiddleware {
     private remoteText (input: string): string {
         return input.includes('\n') && this.runtime.tab.frontend?.supportsBracketedPaste()
             ? '\x1b[200~' + input + '\x1b[201~' : input
+    }
+
+    private insert (text: string): void {
+        this.buffer = this.buffer.slice(0, this.cursor) + text + this.buffer.slice(this.cursor)
+        this.cursor += text.length
+    }
+
+    private previousCharacter (): number {
+        return this.cursor - ([...this.buffer.slice(0, this.cursor)].pop()?.length ?? 0)
+    }
+
+    private nextCharacter (): number {
+        return this.cursor + ([...this.buffer.slice(this.cursor)][0]?.length ?? 0)
+    }
+
+    private async editKey (key: string): Promise<void> {
+        if (this.runtime.locked) { this.onBlockedInput(); return }
+        if (!this.canCapture) { this.forwardReadline(key); return }
+        // History and completion can own an empty Shell line. Once prose is
+        // being edited, control sequences must never transfer it to the PTY.
+        if (!this.buffer && ['\x1b[A', '\x1bOA', '\x1b[B', '\x1bOB', '\x12', '\t'].includes(key)) {
+            await this.giveToReadline(key)
+            return
+        }
+        const prefix = this.buffer.slice(0, this.cursor)
+        const lineStart = prefix.lastIndexOf('\n') + 1
+        const nextNewline = this.buffer.indexOf('\n', this.cursor)
+        const lineEnd = nextNewline < 0 ? this.buffer.length : nextNewline
+        switch (key) {
+            case '\x1b[D': case '\x1bOD': case '\x02': this.cursor = this.previousCharacter(); break
+            case '\x1b[C': case '\x1bOC': case '\x06': this.cursor = this.nextCharacter(); break
+            case '\x1b[H': case '\x1bOH': case '\x1b[1~': case '\x1b[7~': case '\x01': this.cursor = lineStart; break
+            case '\x1b[F': case '\x1bOF': case '\x1b[4~': case '\x1b[8~': case '\x05': this.cursor = lineEnd; break
+            case '\x1b[1;5D': case '\x1bb': this.cursor = prefix.replace(/\s*\S+\s*$/, '').length; break
+            case '\x1b[1;5C': case '\x1bf': this.cursor += /^\s*\S*\s*/.exec(this.buffer.slice(this.cursor))![0].length; break
+            case '\x1b[A': case '\x1bOA': {
+                if (lineStart) {
+                    const start = this.buffer.lastIndexOf('\n', lineStart - 2) + 1
+                    const column = [...prefix.slice(lineStart)].length
+                    this.cursor = start + [...this.buffer.slice(start, lineStart - 1)].slice(0, column).join('').length
+                }
+                break
+            }
+            case '\x1b[B': case '\x1bOB': {
+                if (nextNewline >= 0) {
+                    this.cursor = nextNewline + 1 + [...this.buffer.slice(nextNewline + 1).split('\n')[0]].slice(0, [...prefix.slice(lineStart)].length).join('').length
+                }
+                break
+            }
+            case '\x1b[3~': case '\x04': this.buffer = prefix + this.buffer.slice(this.nextCharacter()); break
+            case '\x0b': this.buffer = prefix + this.buffer.slice(lineEnd); break
+            case '\t':
+                if (this.cursor === this.buffer.length && this.detector.isShellCommand(this.buffer, this.integration.kind ?? undefined)) {
+                    await this.giveToReadline(key)
+                    return
+                }
+                this.insert('\t')
+                break
+            default:
+                this.integration.notice.next('草稿仍保留在本地；如需 Shell 历史或补全，请先清空草稿或明确发送到 Shell')
+                return
+        }
+        await this.paint()
     }
 
     private async giveToReadline (key: string): Promise<void> {
@@ -308,10 +389,20 @@ export class AIInputMiddleware extends SessionMiddleware {
         }
     }
 
+    private async flushTerminal (): Promise<void> {
+        await this.runtime.tab.write('')
+        const frontend = this.runtime.tab.frontend
+        if (frontend instanceof XTermFrontend) {
+            // tab.write only queues xterm input. Its Promise does not wait for
+            // the parser, so buffer coordinates must use the xterm callback.
+            await new Promise<void>(resolve => frontend.xterm.write('', resolve))
+        }
+    }
+
     private async erase (): Promise<void> {
         const frontend = this.runtime.tab.frontend
         if (!(frontend instanceof XTermFrontend) || !this.anchor || this.anchor.isDisposed) { return }
-        await this.runtime.tab.write('')
+        await this.flushTerminal()
         const buffer = frontend.xterm.buffer.active
         let row = this.anchor.line - buffer.baseY
         if (this.anchorColumns !== frontend.xterm.cols) {
@@ -322,6 +413,7 @@ export class AIInputMiddleware extends SessionMiddleware {
         }
         if (row < 0) {
             await this.runtime.tab.write('\r\n' + this.integration.promptText)
+            await this.flushTerminal()
             this.anchor.dispose()
             this.anchor = undefined
             this.captureAnchor()
@@ -332,6 +424,21 @@ export class AIInputMiddleware extends SessionMiddleware {
 
     private async paint (): Promise<void> {
         await this.erase()
-        await this.runtime.tab.write(terminalText(this.buffer))
+        await this.runtime.tab.write(terminalText(this.buffer.slice(0, this.cursor)))
+        const frontend = this.runtime.tab.frontend
+        if (this.cursor === this.buffer.length || !(frontend instanceof XTermFrontend)) {
+            await this.runtime.tab.write(terminalText(this.buffer.slice(this.cursor)))
+            return
+        }
+        await this.flushTerminal()
+        const marker = frontend.xterm.registerMarker(0)
+        const column = frontend.xterm.buffer.active.cursorX
+        await this.runtime.tab.write(terminalText(this.buffer.slice(this.cursor)))
+        await this.flushTerminal()
+        if (marker && !marker.isDisposed) {
+            const row = Math.max(0, marker.line - frontend.xterm.buffer.active.baseY)
+            await this.runtime.tab.write(`\x1b[${row + 1};${Math.min(column, frontend.xterm.cols - 1) + 1}H`)
+        }
+        marker?.dispose()
     }
 }

@@ -2,10 +2,11 @@ import { ChangeDetectorRef, Component, Input, NgZone, OnDestroy, OnInit } from '
 import { Subscription } from 'rxjs'
 
 import { AISessionRuntime } from '../session/ai-session.service'
-import { AgentInteractionService, ApprovalRequest, FormRequest } from '../agent/interaction.service'
+import { AgentInteractionService, ApprovalRequest, FormRequest, InteractionOwner } from '../agent/interaction.service'
 import { TerminalControllerService } from '../terminal/terminal-controller.service'
 import { ApprovalMode } from '../config/config-schema'
 import { AgentPermissionsService } from '../policy/agent-permissions.service'
+import { AISessionStore } from '../session/session-store'
 
 @Component({
     selector: 'ash-agent-dock',
@@ -25,6 +26,7 @@ export class AgentDockComponent implements OnInit, OnDestroy {
     constructor (
         public terminal: TerminalControllerService,
         public permissions: AgentPermissionsService,
+        public store: AISessionStore,
         private interactions: AgentInteractionService,
         private changeDetector: ChangeDetectorRef,
         private zone: NgZone,
@@ -35,25 +37,8 @@ export class AgentDockComponent implements OnInit, OnDestroy {
             this.permissions.config.changed.subscribe(() => this.refresh()),
             this.runtime.terminal.subscribe(() => this.refresh()),
             this.runtime.state.subscribe(() => this.refresh()),
-            this.interactions.requests.subscribe(requests => {
-                this.requests = requests.filter(request => request.sessionId === this.runtime.id)
-                const ids = new Set(this.requests.map(request => request.id))
-                for (const id of this.commands.keys()) {
-                    if (!ids.has(id)) { this.commands.delete(id); this.confirmed.delete(id) }
-                }
-                for (const request of this.requests) {
-                    if (!this.commands.has(request.id)) { this.commands.set(request.id, request.command) }
-                }
-                this.refresh()
-            }),
-            this.interactions.forms.subscribe(forms => {
-                this.forms = forms.filter(form => form.sessionId === this.runtime.id)
-                const ids = new Set(this.forms.map(form => form.id))
-                for (const id of this.values.keys()) {
-                    if (!ids.has(id)) { this.values.delete(id) }
-                }
-                this.refresh()
-            }),
+            this.interactions.requests.subscribe(() => this.refresh()),
+            this.interactions.forms.subscribe(() => this.refresh()),
         )
     }
 
@@ -61,10 +46,34 @@ export class AgentDockComponent implements OnInit, OnDestroy {
         this.subscriptions.forEach(subscription => subscription.unsubscribe())
         this.values.clear()
         this.commands.clear()
+        this.confirmed.clear()
     }
 
     private refresh (): void {
+        this.requests = this.interactions.requests.value.filter(request => this.owns(request))
+        this.forms = this.interactions.forms.value.filter(form => this.owns(form))
+        const requests = new Set(this.requests.map(request => request.id))
+        const forms = new Set(this.forms.map(form => form.id))
+        for (const id of this.commands.keys()) {
+            if (!requests.has(id)) { this.commands.delete(id); this.confirmed.delete(id) }
+        }
+        for (const request of this.requests) {
+            if (!this.commands.has(request.id)) { this.commands.set(request.id, request.command) }
+        }
+        for (const id of this.values.keys()) {
+            if (!forms.has(id)) { this.values.delete(id) }
+        }
         this.zone.run(() => this.changeDetector.markForCheck())
+    }
+
+    private get owner (): InteractionOwner {
+        return { sessionId: this.runtime.id, connectionId: this.runtime.connectionId, runId: this.runtime.activeRunId ?? '' }
+    }
+
+    private owns (request: InteractionOwner): boolean {
+        return this.runtime.terminal.value.state !== 'closed' && !!this.runtime.activeRunId &&
+            request.sessionId === this.runtime.id && request.connectionId === this.runtime.connectionId &&
+            request.runId === this.runtime.activeRunId
     }
 
     get statusLabel (): string {
@@ -79,28 +88,32 @@ export class AgentDockComponent implements OnInit, OnDestroy {
     }
 
     edit (request: ApprovalRequest, value: string): void {
+        if (!this.owns(request) || !this.requests.includes(request)) { return }
         this.commands.set(request.id, value)
         this.confirmed.delete(request.id)
     }
 
     approve (request: ApprovalRequest): void {
+        if (!this.owns(request) || !this.requests.includes(request)) { return }
         if (request.confirmationsRequired > 1 && !this.confirmed.has(request.id)) {
             this.confirmed.add(request.id)
             return
         }
-        this.interactions.resolve(request.id, { approved: true, command: this.commands.get(request.id) ?? request.command })
+        this.interactions.resolve(request.id, { approved: true, command: this.commands.get(request.id) ?? request.command }, this.owner)
         this.runtime.tab.frontend?.focus()
     }
 
     reject (request: ApprovalRequest): void {
-        this.interactions.resolve(request.id, { approved: false, command: request.command })
+        if (!this.owns(request) || !this.requests.includes(request)) { return }
+        this.interactions.resolve(request.id, { approved: false, command: request.command }, this.owner)
         this.runtime.tab.frontend?.focus()
     }
 
     submitForm (form: FormRequest, submitted = true): void {
+        if (!this.owns(form) || !this.forms.includes(form)) { this.values.delete(form.id); return }
         const value = submitted ? this.values.get(form.id) ?? '' : ''
         this.values.delete(form.id)
-        this.interactions.resolveForm(form.id, { submitted, value })
+        this.interactions.resolveForm(form.id, { submitted, value }, this.owner)
         this.runtime.tab.frontend?.focus()
     }
 

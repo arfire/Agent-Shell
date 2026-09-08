@@ -1,4 +1,5 @@
 export type SessionEventType =
+    'session-metadata' |
     'user-ai-input' |
     'ssh-input' |
     'ssh-output' |

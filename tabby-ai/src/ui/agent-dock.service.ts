@@ -21,11 +21,10 @@ export class AgentDockService {
         this.docks.set(runtime.tab, component)
     }
 
-    detach (sessionId: string): void {
-        const entry = [...this.docks.entries()].find(([, component]) => component.instance.runtime.id === sessionId)
-        const component = entry?.[1]
+    detach (tab: AISessionRuntime['tab']): void {
+        const component = this.docks.get(tab)
         if (component) {
-            this.docks.delete(entry[0])
+            this.docks.delete(tab)
             this.app.detachView(component.hostView)
             component.destroy()
         }

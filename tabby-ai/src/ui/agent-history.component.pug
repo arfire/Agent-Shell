@@ -1,4 +1,9 @@
 .p-2
+    ng-container(*ngIf='store.persistence | async as saving')
+        .small.text-warning.mb-2(*ngIf='saving.error', role='alert')
+            div {{saving.error}}。{{saving.pending}} 条记录尚未写入，退出程序可能丢失。正在自动重试。
+            button.btn.btn-sm.btn-link((click)='store.retrySaving()') 立即重试
+        .small.text-muted.mb-2(*ngIf='saving.recovered && !saving.error') 已从历史记录恢复 {{saving.recovered}} 个会话。旧记录缺少服务器信息时，可以重新关联。
     .small.text-break.mb-2 {{target || '点击历史会话，连接对应服务器并恢复上下文'}}
     input.form-control.form-control-sm(placeholder='搜索会话', [(ngModel)]='query', aria-label='搜索 Agent 会话')
     .d-flex.align-items-center.mt-2

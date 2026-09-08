@@ -29,7 +29,7 @@ function load (file) {
         compilerOptions: { target: ts.ScriptTarget.ES2021, module: ts.ModuleKind.CommonJS, experimentalDecorators: true },
     }).outputText
     const localRequire = id => {
-        if (id === '@angular/core') return { Injectable: () => value => value }
+        if (id === '@angular/core') return { Injectable: () => value => value, Component: () => value => value, Input: () => () => undefined }
         if (id === 'tabby-core') return { SubscriptionContainer }
         if (id === 'tabby-terminal') return { ...load('tabby-terminal/src/api/middleware.ts'), XTermFrontend }
         if (id.startsWith('!!raw-loader!')) return { default: fs.readFileSync(path.resolve(path.dirname(filename), id.slice(13)), 'utf8') }
@@ -79,15 +79,19 @@ async function fixture () {
 }
 
 async function main () {
+    await load('tabby-ai/src/ui/agent-dock.component.spec.ts').runTests(test)
+    await load('tabby-ai/src/policy/credential-guard.spec.ts').runTests(test, defaults)
+    await load('tabby-ai/src/policy/execution-boundary.spec.ts').runTests(test, defaults)
+    await load('tabby-ai/src/terminal/ai-input.middleware.spec.ts').runTests(test, fixture)
     const { approvalAction, AgentPermissionsService } = load('tabby-ai/src/policy/agent-permissions.service.ts')
     const { CommandPolicyService } = load('tabby-ai/src/policy/command-policy.service.ts')
     const { AgentService } = load('tabby-ai/src/agent/agent.service.ts')
     await test('permission tiers execute, request approval and deny consistently through Agent tools', async () => {
-        for (const [mode, expected] of Object.entries({ configured: ['execute', 'ask', 'ask', 'deny'], auto: ['execute', 'execute', 'ask', 'deny'], full: ['execute', 'execute', 'execute', 'execute'] })) {
+        for (const [mode, expected] of Object.entries({ configured: ['execute', 'ask', 'ask', 'deny'], auto: ['execute', 'ask', 'ask', 'deny'], full: ['ask', 'ask', 'ask', 'deny'] })) {
             for (const [index, risk] of ['SAFE', 'MODIFY', 'DANGEROUS', 'DENY'].entries()) {
-                const config = { config: { ...defaults, policy: { ...defaults.policy, approvalMode: mode, autoApprove: [], requireApproval: [], requireSecondApproval: [], deny: [], commandRules: [{ command: 'printf', risk }] } } }
+                const config = { config: { ...defaults, policy: { ...defaults.policy, approvalMode: mode, autoApprove: [], requireApproval: [], requireSecondApproval: [], deny: [], commandRules: [{ command: 'pwd', risk }] } } }
                 const events = [], approvals = [], executions = []
-                const runtime = { id: 'permissions', state: new BehaviorSubject('THINKING'), events: new BehaviorSubject([]) }
+                const runtime = { id: 'permissions', tab: {}, state: new BehaviorSubject('THINKING'), events: new BehaviorSubject([]) }
                 const run = { id: 'run', controller: new AbortController(), stopRequested: false, sensitive: new SecretRedactor(config).createScope() }
                 const agent = new AgentService(config, null, null, new CommandPolicyService(config), null,
                     { append: async (_runtime, type, data) => events.push({ type, data }) },
@@ -95,7 +99,7 @@ async function main () {
                     null, { execute: async (_runtime, command) => { executions.push(command); return { output: 'test', exitCode: 0 } } },
                     { interrupt: async () => {}, open: async () => {} }, new AgentPermissionsService(config, null))
                 assert.equal(approvalAction(risk, mode), expected[index])
-                await agent.executeTool(runtime, run, { function: { name: 'terminal_exec', arguments: JSON.stringify({ command: 'printf test', reason: 'Test' }) } })
+                await agent.executeTool(runtime, run, { function: { name: 'terminal_exec', arguments: JSON.stringify({ command: 'pwd', reason: 'Test' }) } })
                 assert.equal(executions.length, expected[index] === 'deny' ? 0 : 1, mode + ':' + risk)
                 assert.equal(approvals.length, expected[index] === 'ask' ? 1 : 0)
                 if (approvals.length) assert.equal(approvals[0].confirmationsRequired, risk === 'DANGEROUS' ? 2 : 1)

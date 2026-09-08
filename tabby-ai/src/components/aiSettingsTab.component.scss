@@ -86,3 +86,12 @@
 .toggle-row { padding: .5rem 0; cursor: pointer; }
 .command-preview { max-width: 54rem; margin: 1.5rem 0; }
 .settings-actions { flex-wrap: wrap; margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid rgba(127, 127, 127, .25); }
+.model-checks { margin: 1rem 0; }
+.model-check {
+    display: flex;
+    gap: 1rem;
+    padding: .6rem 0;
+    border-bottom: 1px solid rgba(127, 127, 127, .18);
+    strong { flex: 0 0 6rem; }
+    span { overflow-wrap: anywhere; }
+}

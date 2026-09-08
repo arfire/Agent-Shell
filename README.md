@@ -10,6 +10,8 @@
 - **执行控制**：支持命令审批、敏感输入脱敏和停止 Agent。
 - **自定义模型**：接入支持 Chat Completions、流式响应和工具调用的模型服务。
 
+操作说明见 [中文使用手册](docs/USER_GUIDE.zh-CN.md)。
+
 ## 启动
 
 准备 **Node.js 22、Yarn 1.x**，在 Windows PowerShell 中执行：
@@ -23,7 +25,7 @@ cd Agent-Shell
 ./scripts/ash-start.ps1
 ```
 
-启动后进入 **设置 → AI**，填写 API 地址、API Key 和模型名称，保存并重启，再打开 SSH 连接即可使用。
+启动后进入 **设置 → AI**，填写 API 地址、API Key 和模型名称，保存后打开 SSH 连接即可使用。
 
 ## 致谢
 

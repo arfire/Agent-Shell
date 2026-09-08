@@ -42,7 +42,12 @@ export class TerminalControllerService {
         this.detach(tab)
         runtime.approvalMode = undefined
         const session = tab.session
-        const integration = new ShellIntegration(async () => { await tab.write('') })
+        const integration = new ShellIntegration(async () => {
+            await tab.write('')
+            if (tab.frontend instanceof XTermFrontend) {
+                await new Promise<void>(resolve => (tab.frontend as XTermFrontend).xterm.write('', resolve))
+            }
+        })
         const input = new AIInputMiddleware(runtime, this.sessions, this.detector, integration,
             value => onAIRequest(value, input),
             () => this.toastr.info(integration.notice.value || 'Agent 正在操作终端，请使用底部操作面板'))

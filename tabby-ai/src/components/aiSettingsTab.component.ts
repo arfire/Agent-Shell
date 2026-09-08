@@ -1,4 +1,4 @@
-import { Component, HostBinding } from '@angular/core'
+import { Component, HostBinding, OnDestroy } from '@angular/core'
 import { ToastrService } from 'ngx-toastr'
 
 import { AIConfig, CommandRisk } from '../config/config-schema'
@@ -7,13 +7,14 @@ import { CommandPolicyService } from '../policy/command-policy.service'
 import { AIInputDetector } from '../terminal/input-detector'
 import { AIConfigService } from '../config/ai-config.service'
 import { ChatCompletionsClient } from '../llm/chat-completions.client'
+import { ModelCheck, ModelCompatibilityService } from '../llm/model-compatibility.service'
 
 @Component({
     selector: 'ash-ai-settings',
     templateUrl: './aiSettingsTab.component.pug',
     styleUrls: ['./aiSettingsTab.component.scss'],
 })
-export class AISettingsTabComponent {
+export class AISettingsTabComponent implements OnDestroy {
     @HostBinding('class.content-box') true
 
     model: AIConfig|null = null
@@ -22,6 +23,10 @@ export class AISettingsTabComponent {
     testing = false
     loadingModels = false
     connectionResult: { success: boolean, message: string }|null = null
+    modelChecks: ModelCheck[] = []
+    private checkController?: AbortController
+    private destroyed = false
+    private checkRevision = 0
     modelListResult: { success: boolean, message: string }|null = null
     availableModels: string[] = []
     modelPickerVisible = false
@@ -48,6 +53,7 @@ export class AISettingsTabComponent {
         public configService: AIConfigService,
         private toastr: ToastrService,
         private client: ChatCompletionsClient,
+        private compatibility: ModelCompatibilityService,
         public permissions: AgentPermissionsService,
         private policy: CommandPolicyService,
         private detector: AIInputDetector,
@@ -61,20 +67,38 @@ export class AISettingsTabComponent {
         }
         this.testing = true
         this.connectionResult = null
+        this.modelChecks = []
+        const controller = new AbortController()
+        const revision = ++this.checkRevision
+        this.checkController = controller
+        const settings = { ...this.model.llm }
         try {
-            const result = await this.client.testConnection(this.model.llm)
-            const reply = result.content ? ` Reply: ${result.content}` : ''
+            const checks = await this.compatibility.check(settings, progress => {
+                if (!this.destroyed && revision === this.checkRevision) { this.modelChecks = progress }
+            }, controller.signal)
+            if (this.destroyed || revision !== this.checkRevision) { return }
+            const success = checks.every(check => check.state === 'passed')
             this.connectionResult = {
-                success: true,
-                message: `Model ${result.model} responded successfully.${reply}`,
+                success,
+                message: controller.signal.aborted ? '检查已取消。' : success
+                    ? '四项检查通过，可以使用 Agent。实际任务仍受模型能力和服务状态影响。'
+                    : '检查未全部通过，请查看下方结果。只会聊天的模型不一定支持 Agent 执行任务。',
             }
-            this.toastr.success(this.connectionResult.message, 'AI connection successful')
         } catch (error) {
-            this.connectionResult = { success: false, message: String(error) }
-            this.toastr.error(this.connectionResult.message, 'AI connection failed')
+            if (!this.destroyed && revision === this.checkRevision) { this.connectionResult = { success: false, message: String(error) } }
         } finally {
             this.testing = false
+            this.checkController = undefined
         }
+    }
+
+    cancelCheck (): void {
+        this.checkController?.abort(new DOMException('检查已取消', 'AbortError'))
+    }
+
+    ngOnDestroy (): void {
+        this.destroyed = true
+        this.cancelCheck()
     }
 
     async loadModels (): Promise<void> {
@@ -102,6 +126,9 @@ export class AISettingsTabComponent {
             return
         }
         this.model.llm.model = modelId
+        this.checkRevision++
+        this.cancelCheck()
+        this.modelChecks = []
         this.connectionResult = null
     }
 
@@ -124,6 +151,9 @@ export class AISettingsTabComponent {
     }
 
     markChanged (): void {
+        this.checkRevision++
+        this.cancelCheck()
+        this.modelChecks = []
         this.connectionResult = null
         this.modelListResult = null
         this.availableModels = []
@@ -154,6 +184,7 @@ export class AISettingsTabComponent {
         if (this.section === 'policy') { this.model.policy = defaults.policy }
         if (this.section === 'redaction') { this.model.redaction = defaults.redaction }
         if (this.section === 'model') {
+            this.markChanged()
             this.model.agent = defaults.agent
             this.model.llm.temperature = defaults.llm.temperature
             this.model.llm.timeout = defaults.llm.timeout

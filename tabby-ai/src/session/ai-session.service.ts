@@ -1,5 +1,6 @@
 import { Injectable } from '@angular/core'
 import { BehaviorSubject } from 'rxjs'
+import * as crypto from 'crypto'
 import { SSHTabComponent } from 'tabby-ssh'
 
 import { AISessionStore } from './session-store'
@@ -9,6 +10,8 @@ import { ApprovalMode } from '../config/config-schema'
 
 export interface AISessionRuntime {
     id: string
+    /** Identifies this live SSH tab, independent of the selected transcript. */
+    connectionId: string
     tab: SSHTabComponent
     events: BehaviorSubject<SessionEvent[]>
     liveText: BehaviorSubject<string>
@@ -66,13 +69,23 @@ export class AISessionService {
             user: tab.profile.options.user,
             port: tab.profile.options.port ?? 22,
         }
-        const id = tab.aiSessionId
-            ? await this.store.ensureSession(tab.aiSessionId, details)
-            : await this.store.createSession(details)
+        const requestedId = tab.aiSessionId
+        const canRestore = requestedId && !this.loadingContexts.has(requestedId) &&
+            ![...this.sessions.values()].some(runtime => runtime.id === requestedId)
+        if (canRestore) { this.loadingContexts.add(requestedId) }
+        let id = ''
+        let events: SessionEvent[] = []
+        try {
+            id = canRestore ? await this.store.ensureSession(requestedId, details) : await this.store.createSession(details)
+            events = await this.store.read(id)
+        } catch (error) {
+            if (canRestore) { this.loadingContexts.delete(requestedId) }
+            throw error
+        }
         tab.aiSessionId = id
-        const events = await this.store.read(id)
         const runtime: AISessionRuntime = {
             id,
+            connectionId: crypto.randomUUID(),
             tab,
             events: new BehaviorSubject(events),
             historyToRestore: events.length ? events : undefined,
@@ -82,6 +95,7 @@ export class AISessionService {
             terminal: new BehaviorSubject({ mode: 'agent' as const, ready: false, notice: '正在连接 Shell…', state: 'initializing' }),
         }
         this.sessions.set(tab, runtime)
+        if (canRestore) { this.loadingContexts.delete(requestedId) }
         return runtime
     }
 

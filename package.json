@@ -109,6 +109,7 @@
     "docs": "node scripts/build-docs.mjs",
     "lint": "eslint --ext ts */src */lib",
     "test:native-agent": "node scripts/test-native-agent.cjs",
+    "test:ai-reliability": "node scripts/test-ai-reliability.cjs",
     "test:native-agent:pty": "node scripts/test-native-agent-pty.cjs",
     "test:native-agent:ssh": "node scripts/test-native-agent-docker.cjs",
     "postinstall": "patch-package && node ./scripts/install-deps.mjs && node ./scripts/build-native.mjs",

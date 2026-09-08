@@ -73,7 +73,13 @@ ng-container(*ngIf='model')
             .header
                 .title 最近终端输出行数
             input.form-control(type='number', min='1', [(ngModel)]='model.agent.recentOutputLines')
-        button.btn.btn-outline-secondary(type='button', (click)='testConnection()', [disabled]='testing || !model.llm.baseURL || !model.llm.model') {{ testing ? '测试中…' : '测试连接' }}
+        button.btn.btn-outline-secondary(type='button', (click)='testConnection()', [disabled]='testing || !model.llm.baseURL || !model.llm.model') {{ testing ? '检查中…' : '检查模型可用性' }}
+        button.btn.btn-link(type='button', *ngIf='testing', (click)='cancelCheck()') 取消检查
+        p.setting-help 使用当前填写的配置发起少量模型请求，可能消耗额度。工具为本地模拟，不连接 SSH，也不执行服务器命令。
+        .model-checks(*ngIf='modelChecks.length', aria-live='polite')
+            .model-check(*ngFor='let check of modelChecks', [class.text-success]='check.state === "passed"', [class.text-warning]='check.state === "failed"')
+                strong {{check.label}}
+                span {{check.state === 'pending' ? '等待检查' : check.state === 'running' ? '检查中…' : check.message}}
         .alert.mt-2(*ngIf='connectionResult', [class.alert-success]='connectionResult.success', [class.alert-danger]='!connectionResult.success') {{ connectionResult.message }}
     .settings-section(*ngIf='section === "input"')
         p.text-muted Agent 模式下，这些命令会优先识别为 Shell。每行一个命令名，多行命令仍按完整输入识别。
@@ -113,7 +119,8 @@ ng-container(*ngIf='model')
     .settings-section(*ngIf='section === "redaction"')
         label.toggle-row
             input(type='checkbox', [(ngModel)]='model.redaction.enabled')
-            span 启用敏感信息脱敏
+            span 启用额外脱敏规则
+        p.setting-help 密码、密钥等核心凭据始终脱敏；Agent 凭据访问限制在所有执行权限下生效。
         p.text-muted 在内容发送给模型和写入会话记录前替换匹配的敏感信息。
         label.toggle-row(*ngFor='let rule of model.redaction.patterns')
             input(type='checkbox', [ngModel]='rule.enabled !== false', (ngModelChange)='rule.enabled = $event', [disabled]='!model.redaction.enabled')

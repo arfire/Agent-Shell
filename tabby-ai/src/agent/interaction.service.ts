@@ -4,10 +4,19 @@ import * as crypto from 'crypto'
 
 import { CommandRisk } from '../config/config-schema'
 
-export interface ApprovalRequest {
-    id: string
+export interface InteractionOwner {
     sessionId: string
+    connectionId: string
     runId: string
+}
+
+function sameOwner (request: InteractionOwner, owner: InteractionOwner): boolean {
+    return !!owner.connectionId && !!owner.runId && request.connectionId === owner.connectionId &&
+        request.runId === owner.runId && request.sessionId === owner.sessionId
+}
+
+export interface ApprovalRequest extends InteractionOwner {
+    id: string
     command: string
     reason: string
     risk: CommandRisk
@@ -19,10 +28,8 @@ export interface ApprovalResponse {
     command: string
 }
 
-export interface FormRequest {
+export interface FormRequest extends InteractionOwner {
     id: string
-    sessionId: string
-    runId: string
     prompt: string
     kind: 'text'|'password'
 }
@@ -47,14 +54,17 @@ export class AgentInteractionService {
         })
     }
 
-    resolve (requestId: string, response: ApprovalResponse): void {
+    resolve (requestId: string, response: ApprovalResponse, owner: InteractionOwner): boolean {
+        const request = this.requests.value.find(item => item.id === requestId)
+        if (!request || !sameOwner(request, owner)) { return false }
         const resolver = this.resolvers.get(requestId)
         if (!resolver) {
-            return
+            return false
         }
         this.resolvers.delete(requestId)
         this.requests.next(this.requests.value.filter(item => item.id !== requestId))
         resolver(response)
+        return true
     }
 
     requestForm (value: Omit<FormRequest, 'id'>): Promise<FormResponse> {
@@ -65,22 +75,25 @@ export class AgentInteractionService {
         })
     }
 
-    resolveForm (requestId: string, response: FormResponse): void {
+    resolveForm (requestId: string, response: FormResponse, owner: InteractionOwner): boolean {
+        const request = this.forms.value.find(item => item.id === requestId)
+        if (!request || !sameOwner(request, owner)) { return false }
         const resolver = this.formResolvers.get(requestId)
         if (!resolver) {
-            return
+            return false
         }
         this.formResolvers.delete(requestId)
         this.forms.next(this.forms.value.filter(item => item.id !== requestId))
         resolver(response)
+        return true
     }
 
     cancelRun (runId: string): void {
         for (const request of this.requests.value.filter(item => item.runId === runId)) {
-            this.resolve(request.id, { approved: false, command: request.command })
+            this.resolve(request.id, { approved: false, command: request.command }, request)
         }
         for (const form of this.forms.value.filter(item => item.runId === runId)) {
-            this.resolveForm(form.id, { submitted: false, value: '' })
+            this.resolveForm(form.id, { submitted: false, value: '' }, form)
         }
     }
 }

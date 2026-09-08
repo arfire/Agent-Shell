@@ -35,7 +35,7 @@ export class AgentHistoryComponent implements OnInit, OnDestroy {
     private generation = 0
 
     constructor (
-        private store: AISessionStore,
+        public store: AISessionStore,
         public sessions: AISessionService,
         private launcher: AISessionLauncher,
         private profilesService: ProfilesService,

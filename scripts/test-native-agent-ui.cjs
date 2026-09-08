@@ -17,12 +17,25 @@ const model = http.createServer(async (req, res) => {
     let body = ''
     for await (const chunk of req) body += chunk
     requests.push(body)
-    const messages = JSON.parse(body).messages
+    const request = JSON.parse(body)
+    const messages = request.messages
     const lastUser = messages.filter(message => message.role === 'user').at(-1)?.content ?? ''
     const toolDone = messages.at(-1)?.role === 'tool'
+    if (!request.stream) {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }))
+        return
+    }
     res.writeHead(200, { 'Content-Type': 'text/event-stream' })
     const delta = value => res.write('data: ' + JSON.stringify({ choices: [{ delta: value }] }) + '\n\n')
-    if (lastUser.includes('停止测试') && !toolDone) {
+    if (request.tools?.[0]?.function.name === 'ash_connection_check') {
+        if (toolDone) { delta({ content: JSON.parse(messages.at(-1).content).value }) }
+        else { delta({ tool_calls: [{ index: 0, id: 'compatibility-check', type: 'function', function: { name: 'ash_connection_check', arguments: '{"text":"ash-check"}' } }] }) }
+    } else if (lastUser.includes('删除卷审批测试') && !toolDone) {
+        delta({ tool_calls: [{ index: 0, id: 'destructive-guard-test', type: 'function', function: { name: 'terminal_exec', arguments: JSON.stringify({ command: 'docker compose down -v', reason: '验证删除卷必须二次确认；测试会拒绝执行' }) } }] })
+    } else if (lastUser.includes('凭据边界测试') && !toolDone) {
+        delta({ tool_calls: [{ index: 0, id: 'credential-guard-test', type: 'function', function: { name: 'terminal_exec', arguments: JSON.stringify({ command: 'grep MYSQL_ROOT_PASSWORD .env', reason: '验证凭据读取被本地拦截' }) } }] })
+    } else if (lastUser.includes('停止测试') && !toolDone) {
         delta({ tool_calls: [{ index: 0, id: 'stop-test', type: 'function', function: { name: 'terminal_exec', arguments: JSON.stringify({ command: "sleep 20", reason: '验证停止按钮中断当前测试进程' }) } }] })
     } else if (lastUser.includes('接管测试') && !toolDone) {
         delta({ tool_calls: [{ index: 0, id: 'handoff-test', type: 'function', function: { name: 'terminal_exec', arguments: JSON.stringify({ command: "printf 'HANDOFF_STARTED\\n'; sleep 2; printf 'HANDOFF_DONE\\n'", reason: '验证切换后远端命令继续完成' }) } }] })
@@ -30,6 +43,8 @@ const model = http.createServer(async (req, res) => {
         delta({ tool_calls: [{ index: 0, id: 'local-test', type: 'function', function: { name: 'terminal_exec', arguments: JSON.stringify({ command: "printf 'APPROVAL_OK\\n'", reason: '本地审批验证：输出测试标记' }) } }] })
     } else if (lastUser.includes('敏感输入测试') && !toolDone) {
         delta({ tool_calls: [{ index: 0, id: 'secret-test', type: 'function', function: { name: 'request_user_input', arguments: JSON.stringify({ prompt: '请输入测试 Token（仅用于本地验证）', kind: 'secret' }) } }] })
+    } else if (toolDone && JSON.parse(messages.at(-1).content).status === 'rejected') {
+        delta({ content: '命令未执行，我会根据已有信息继续分析。REJECTION_CONTINUED\n' })
     } else {
         for (const text of ['## 当前终端工作正常。\n', 'Agent 回答与 Shell 输出使用**同一份终端历史**。\n', '- 中文、多行文本和复制均由 xterm 处理。\n', '> 这里只用终端字符呈现。\n', '```bash\necho "native markdown"\n```\n']) {
             delta({ content: text }); await delay(50)
@@ -50,12 +65,16 @@ async function main () {
     const port = debug.address().port
     await new Promise(resolve => debug.close(resolve))
     const log = fs.openSync(path.join(directory, 'electron.log'), 'w')
-    electron = spawn(path.join(root, 'node_modules/electron/dist/electron.exe'), [path.join(root, 'app'), '--remote-debugging-port=' + port], {
+    // This process has a unique userData directory. Avoid forwarding QA startup
+    // to an already running portable app or registering its URL protocol.
+    const bootstrap = path.join(directory, 'bootstrap.cjs')
+    fs.writeFileSync(bootstrap, `const {app}=require('electron');app.setAppPath(${JSON.stringify(path.join(root, 'app'))});app.requestSingleInstanceLock=()=>true;app.setAsDefaultProtocolClient=()=>false;require(${JSON.stringify(path.join(root, 'app/dist/main.js'))});`)
+    electron = spawn(path.join(root, 'node_modules/electron/dist/electron.exe'), [bootstrap, '--remote-debugging-port=' + port], {
         cwd: root, windowsHide: true, stdio: ['ignore', log, log],
         env: { ...process.env, TABBY_DEV: '1', TABBY_DATA_DIRECTORY: directory, TABBY_CONFIG_DIRECTORY: directory },
     })
     let target
-    for (let tries = 0; tries < 100; tries++) {
+    for (let tries = 0; tries < 300; tries++) {
         try { target = (await (await fetch('http://127.0.0.1:' + port + '/json')).json()).find(item => item.type === 'page'); if (target) break } catch {}
         await delay(200)
     }
@@ -147,6 +166,76 @@ async function main () {
     await ready()
     // Reuse production sidebar components against the disposable SSH server.
     const inZone = code => evaluate('(async()=>{const zone=nativeTestInjector.get(require("@angular/core").NgZone);return await zone.run(async()=>{' + code + '})})()')
+    // Two live SSH tabs, deliberately restored from the same transcript id.
+    await inZone(`
+        const app=nativeTestInjector.get(require('tabby-core').AppService)
+        const profile=JSON.parse(JSON.stringify(nativeTest.profile))
+        profile.name='Second SSH · Isolation QA'
+        window.secondSSH=app.openNewTab({type:require('tabby-ssh').SSHTabComponent,inputs:{profile,aiSessionId:nativeTest.aiSessionId}})
+        return true
+    `)
+    await wait('!!secondSSH.element.nativeElement.querySelector("ash-agent-dock") && ng.getComponent(secondSSH.element.nativeElement.querySelector("ash-agent-dock")).runtime.terminal.value.ready', 'second SSH dock ready')
+    await evaluate(`
+        window.firstDock=ng.getComponent(nativeTest.element.nativeElement.querySelector('ash-agent-dock'))
+        window.secondDock=ng.getComponent(secondSSH.element.nativeElement.querySelector('ash-agent-dock'))
+        nativeTest.sendInput('审批测试\\r')
+        secondSSH.sendInput('敏感输入测试\\r')
+        true
+    `)
+    await wait('firstDock.requests.length===1 && secondDock.forms.length===1', 'independent approval and password forms')
+    assert.equal(await evaluate('firstDock.forms.length===0 && secondDock.requests.length===0 && firstDock.runtime.connectionId!==secondDock.runtime.connectionId && firstDock.runtime.id!==secondDock.runtime.id'), true)
+    await wait('!!secondSSH.element.nativeElement.querySelector("input[type=password]")', 'second SSH form rendered')
+    assert.equal(await evaluate('!secondSSH.element.nativeElement.querySelector("ash-agent-dock textarea") && !nativeTest.element.nativeElement.querySelector("ash-agent-dock input[type=password]")'), true, 'Foreign interaction rendered in SSH window')
+    await screen('ssh-window-isolation')
+    await inZone(`
+        const request=firstDock.requests[0]
+        secondDock.approve(request)
+        secondDock.reject(request)
+        firstDock.submitForm(secondDock.forms[0])
+        return true
+    `)
+    assert.equal(await evaluate('firstDock.requests.length===1 && secondDock.forms.length===1'), true, 'Cross-window action resolved an unrelated request')
+    await inZone('secondDock.submitForm(secondDock.forms[0],false);return true')
+    await wait('!secondDock.runtime.activeRunId', 'cancel second SSH input')
+    assert.equal(await evaluate('firstDock.requests.length'), 1, 'Cancelling second connection removed first approval')
+    await inZone('firstDock.reject(firstDock.requests[0]);return true')
+    await wait('!firstDock.runtime.activeRunId', 'cancel first SSH approval')
+    assert.equal(await evaluate('firstDock.runtime.state.value'), 'DONE', 'Command rejection stopped the Agent')
+    assert.equal(await evaluate('firstDock.runtime.events.value.some(e=>e.type==="ai-message" && e.data.content.includes("REJECTION_CONTINUED"))'), true, 'Agent did not continue thinking after rejection')
+    await inZone('await nativeTestInjector.get(require("tabby-core").AppService).closeTab(secondSSH.parent ?? secondSSH);return true')
+    await wait('!secondSSH.element.nativeElement.querySelector("ash-agent-dock")', 'second dock removed independently')
+    assert.equal(await evaluate('!!nativeTest.element.nativeElement.querySelector("ash-agent-dock")'), true)
+    await ready()
+    const editWrites = await evaluate('nativeTest.testWrites.length')
+    await send('帮我检查配错置')
+    await send('\x1b[D\x7f\x1b[H')
+    await send('请')
+    assert.equal(await evaluate('(()=>{const input=ng.getComponent(document.querySelector("ash-agent-dock")).terminal.attachments.get(nativeTest).input;return nativeTest.frontend.xterm.buffer.active.cursorX-input.anchorColumn})()'), 2, 'Visible cursor did not follow local draft editing')
+    await screen('edited-agent-draft')
+    assert.equal(await evaluate('nativeTest.testWrites.slice(' + editWrites + ').filter(text => !/^\\x1b\\[(?:[IO]|[?>]?[\\d;]*[cR])$/.test(text)).join("")'), '', 'Cursor editing leaked draft to SSH')
+    await send('\r')
+    await wait('!ng.getComponent(document.querySelector("ash-agent-dock")).runtime.activeRunId', 'edited Agent request')
+    assert.ok(requests.some(body => JSON.parse(body).messages.some(message => message.role === 'user' && message.content === '请帮我检查配置')))
+    await ready()
+    await inZone('ng.getComponent(document.querySelector("ash-agent-dock")).runtime.approvalMode="full";return true')
+    await send('凭据边界测试\r')
+    await wait('!ng.getComponent(document.querySelector("ash-agent-dock")).runtime.activeRunId', 'credential guard in full mode')
+    assert.equal(await evaluate('ng.getComponent(document.querySelector("ash-agent-dock")).runtime.events.value.some(e=>e.type==="ssh-input" && e.data.source==="ai" && e.data.content.includes(".env"))'), false, 'Credential read bypassed full mode guard')
+    assert.ok(requests.some(body => JSON.parse(body).messages.some(message => message.role === 'tool' && message.tool_call_id === 'credential-guard-test' && JSON.parse(message.content).error.includes('request_user_input'))))
+    await ready()
+    const destructiveWrites = await evaluate('nativeTest.testWrites.length')
+    await send('删除卷审批测试\r')
+    await wait('!!document.querySelector("ash-agent-dock textarea")', 'destructive approval')
+    assert.equal(await evaluate('ng.getComponent(document.querySelector("ash-agent-dock")).requests[0].confirmationsRequired'), 2)
+    await evaluate('document.querySelector("ash-agent-dock .btn-primary").click();true')
+    await delay(150)
+    assert.equal(await evaluate('!!document.querySelector("ash-agent-dock textarea")'), true, 'First confirmation executed destructive command')
+    await screen('destructive-second-confirmation')
+    await evaluate('document.querySelector("ash-agent-dock .interaction .btn-secondary").click();true')
+    await wait('!ng.getComponent(document.querySelector("ash-agent-dock")).runtime.activeRunId', 'destructive command rejected')
+    assert.equal(await evaluate('nativeTest.testWrites.slice(' + destructiveWrites + ').some(text=>text.includes("ZG9ja2VyIGNvbXBvc2UgZG93biAtdg=="))'), false)
+    await inZone('ng.getComponent(document.querySelector("ash-agent-dock")).runtime.approvalMode=undefined;return true')
+    await ready()
     await inZone('ng.getComponent(document.querySelector("workspace-sidebar")).select("files");return true')
     await wait('!!ng.getComponent(document.querySelector("sftp-panel"))?.fileList', 'SFTP sidebar connected')
     assert.equal(await inZone(`
@@ -307,6 +396,25 @@ async function main () {
     assert.match(tail, /(?:^|\n)\s*1\s*(?:\n|$)/, 'History replay executed an old Shell command')
     await screen('history-reopened')
     // Use the actual Angular settings page, isolated configuration and native Dock.
+    await inZone(`
+        const dock=ng.getComponent(document.querySelector('ash-agent-dock'))
+        window.qaSessionStore=dock.store
+        window.qaSessionId=dock.runtime.id
+        const fs=require('fs')
+        window.qaAppendFile=fs.promises.appendFile
+        const file=dock.store.getSessionPath(qaSessionId)
+        fs.promises.appendFile=async (...args)=>{
+            if(args[0]===file) throw Object.assign(new Error('QA storage failure'),{code:'ENOSPC'})
+            return qaAppendFile(...args)
+        }
+        await dock.store.append(qaSessionId,'ssh-output',{content:'QA_PERSISTENCE_RETRY'})
+        return true
+    `)
+    await wait('document.querySelector("ash-agent-dock").innerText.includes("仅保存在内存中")', 'storage failure visible in Dock')
+    await screen('storage-retry-notice')
+    await inZone('require("fs").promises.appendFile=qaAppendFile;await qaSessionStore.retrySaving();return true')
+    await wait('!ng.getComponent(document.querySelector("ash-agent-dock")).store.persistence.value.error', 'storage retry clears notice')
+    assert.equal(await evaluate('(async()=> (await qaSessionStore.read(qaSessionId)).some(e=>e.data.content==="QA_PERSISTENCE_RETRY"))()'), true)
     await evaluate('require("@electron/remote").getCurrentWindow().setSize(1280,800); true')
     await inZone(`
         const app=nativeTestInjector.get(require('tabby-core').AppService)
@@ -314,6 +422,14 @@ async function main () {
         return true
     `)
     await wait('document.querySelector("ash-ai-settings") && !!ng.getComponent(document.querySelector("ash-ai-settings"))?.model', 'AI settings rendered')
+    const commandCountBeforeCheck = await evaluate('nativeTest.testWrites?.length || 0')
+    await inZone('void ng.getComponent(document.querySelector("ash-ai-settings")).testConnection();return true')
+    await wait('!ng.getComponent(document.querySelector("ash-ai-settings")).testing && ng.getComponent(document.querySelector("ash-ai-settings")).modelChecks.length===4', 'model capability check completed')
+    assert.equal(await evaluate('ng.getComponent(document.querySelector("ash-ai-settings")).modelChecks.every(check=>check.state==="passed")'), true)
+    assert.equal(await evaluate('nativeTest.testWrites?.length || 0'), commandCountBeforeCheck)
+    await evaluate('document.querySelector("ash-ai-settings .model-checks").scrollIntoView({block:"center"});true')
+    await delay(150)
+    await screen('ai-model-check')
     assert.equal(await evaluate('!!document.querySelector("settings-tab .fa-wand-magic-sparkles")'), true)
     assert.equal(await inZone(`
         const s=ng.getComponent(document.querySelector('ash-ai-settings'))
@@ -342,7 +458,9 @@ async function main () {
     await inZone('await nativeTestInjector.get(require("tabby-core").AppService).closeTab(qaSettingsTab);return true')
     await ready()
     await send('审批测试\r')
-    await wait('!ng.getComponent(document.querySelector("ash-agent-dock")).runtime.activeRunId && ng.getComponent(document.querySelector("ash-agent-dock")).runtime.state.value === "DONE"', 'auto mode without approval')
+    await wait('!!document.querySelector("ash-agent-dock textarea")', 'auto mode still requires modification approval')
+    await evaluate('document.querySelector("ash-agent-dock .btn-primary").click();true')
+    await wait('!ng.getComponent(document.querySelector("ash-agent-dock")).runtime.activeRunId && ng.getComponent(document.querySelector("ash-agent-dock")).runtime.state.value === "DONE"', 'approved modification completed')
     assert.equal(await evaluate('!!document.querySelector("ash-agent-dock textarea")'), false)
     await inZone(`
         const config=JSON.parse(JSON.stringify(qaAISettings.configService.config))
@@ -353,8 +471,8 @@ async function main () {
         return true
     `)
     await send('审批测试\r')
-    await wait('!ng.getComponent(document.querySelector("ash-agent-dock")).runtime.activeRunId && ng.getComponent(document.querySelector("ash-agent-dock")).runtime.state.value === "DONE"', 'full mode executes configured denied command')
-    assert.equal(await evaluate('ng.getComponent(document.querySelector("ash-agent-dock")).runtime.events.value.some(e=>e.type==="approval" && e.data.automatic && e.data.permissionMode==="full" && e.data.risk==="DENY")'), true)
+    await wait('!ng.getComponent(document.querySelector("ash-agent-dock")).runtime.activeRunId && ng.getComponent(document.querySelector("ash-agent-dock")).runtime.state.value === "DONE"', 'legacy full mode rejects configured denied command')
+    assert.equal(await evaluate('ng.getComponent(document.querySelector("ash-agent-dock")).runtime.events.value.some(e=>e.type==="approval" && e.data.automatic && e.data.permissionMode==="full" && e.data.risk==="DENY")'), false)
     await inZone('await qaAISettings.configService.save(qaOriginalAIConfig);await ng.getComponent(document.querySelector("ash-agent-dock")).changePermission("");return true')
     console.log('PASS Electron + SSH (' + testShell + '): input privacy, native output, approval, sensitive Dock, original mode')
     console.log('Screenshots and isolated data:', directory)
@@ -363,7 +481,7 @@ async function main () {
     await delay(300)
     void evaluate('require("@electron/remote").app.exit(0)')
 }
-const timeout = setTimeout(() => { console.error('UI test timed out:', directory); socket?.close(); electron?.kill(); model.close(); process.exitCode = 1 }, 150000)
+const timeout = setTimeout(() => { console.error('UI test timed out:', directory); socket?.close(); electron?.kill(); model.close(); process.exitCode = 1 }, 240000)
 main().catch(error => { console.error(error); console.error('Test data:', directory); process.exitCode = 1 }).finally(() => {
     clearTimeout(timeout); socket?.close(); electron?.kill(); model.close()
 })
