@@ -2,7 +2,7 @@ export type InteractivePromptKind = 'password'|'yes-no'|'text'
 
 function stripTerminalControls (content: string): string {
     return content
-        .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '')
+        .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
         .replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, '')
         .replace(/\x1b[ -\/]*[0-~]/g, '')
 }

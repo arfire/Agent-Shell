@@ -79,7 +79,7 @@ export class AIInputMiddleware extends SessionMiddleware {
 
     feedFromTerminal (data: Buffer): void {
         // Device/status replies and focus notifications are terminal protocol, not typed drafts.
-        if (/^\x1b\[(?:\??\d+;\d+R|[?>]?[\d;]*c|\??\d+;\d+\$y|[IO])$/.test(data.toString())) {
+        if (/^(?:\x1b\[(?:\??\d+;\d+R|[?>]?[\d;]*c|\??\d+;\d+\$y|[IO])|\x1b\](?:10|11|12);rgb:[\da-f/]+(?:\x07|\x1b\\)|\x1bP[01]\+r[\da-f=;]*\x1b\\)+$/i.test(data.toString())) {
             this.sendAgent(data)
             return
         }

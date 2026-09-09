@@ -31,6 +31,8 @@ export class AISessionStore implements OnDestroy {
     private readonly sessionsDirectory: string
     private readonly indexPath: string
     private readonly metadata = new Map<string, SessionMetadata>()
+    private readonly drafts = new Set<string>()
+    private readonly retired = new Set<string>()
     private readonly writes = new Map<string, Promise<void>>()
     private readonly pending = new Map<string, SessionEvent[]>()
     private readonly repairNeeded = new Set<string>()
@@ -56,10 +58,51 @@ export class AISessionStore implements OnDestroy {
         return this.ensureSession(crypto.randomUUID(), details)
     }
 
+    async createDraft (details: SessionDetails = {}): Promise<string> {
+        await this.ready
+        if (!this.initialized) { throw new Error('会话存储暂不可用，请恢复磁盘权限或空间后重试连接') }
+        const id = crypto.randomUUID()
+        const now = new Date().toISOString()
+        this.drafts.add(id)
+        this.metadata.set(id, { id, createdAt: now, updatedAt: now, nextSeq: 1, ...details })
+        await this.append(id, 'session-metadata', details)
+        return id
+    }
+
+    isDraft (id: string): boolean { return this.drafts.has(id) }
+    isRetired (id: string): boolean { return this.retired.has(id) }
+
+    discardDraft (id: string): void {
+        if (!this.drafts.delete(id)) { return }
+        this.retired.add(id)
+        this.pending.delete(id)
+        this.metadata.delete(id)
+    }
+
+    async deleteSession (id: string): Promise<void> {
+        await this.ready
+        const journal = this.getSessionPath(id)
+        if (this.drafts.has(id)) { this.discardDraft(id); return }
+        // A content-free tombstone prevents stale writes and crash recovery from resurrecting a deletion.
+        await fs.promises.writeFile(`${journal}.deleted`, '', 'utf8')
+        this.retired.add(id)
+        await this.writes.get(id)
+        this.pending.delete(id)
+        this.metadata.delete(id)
+        this.repairNeeded.delete(id)
+        this.failures.delete(id)
+        try {
+            await fs.promises.rm(journal, { force: true })
+            await this.saveIndex()
+            if (this.failures.has('index')) { throw new Error('删除已生效，但历史索引尚未保存，请重试') }
+        } finally { this.changed.next(); this.publishStatus() }
+    }
+
     async ensureSession (id: string, details: SessionDetails = {}): Promise<string> {
         await this.ready
         if (!this.initialized) { throw new Error('会话存储暂不可用，请恢复磁盘权限或空间后重试连接') }
         this.getSessionPath(id)
+        if (this.retired.has(id)) { throw new Error('会话已删除') }
         if (!this.metadata.has(id)) {
             const now = new Date().toISOString()
             this.metadata.set(id, { id, createdAt: now, updatedAt: now, nextSeq: 1, ...details })
@@ -72,28 +115,47 @@ export class AISessionStore implements OnDestroy {
 
     async append<T> (sessionId: string, type: SessionEventType, data: T, runId?: string): Promise<SessionEvent<T>> {
         await this.ready
-        await this.ensureSession(sessionId)
+        const ignored = (): SessionEvent<T> => ({ version: 1, id: crypto.randomUUID(), sessionId, seq: 0, time: new Date().toISOString(), type, runId, data })
+        if (this.retired.has(sessionId)) { return ignored() }
+        try { await this.ensureSession(sessionId) } catch (error) {
+            if (this.retired.has(sessionId)) { return ignored() }
+            throw error
+        }
+        if (this.retired.has(sessionId)) { return ignored() }
         const metadata = this.metadata.get(sessionId)!
         const event = JSON.parse(JSON.stringify({
             version: 1, id: crypto.randomUUID(), sessionId, seq: metadata.nextSeq++,
             time: new Date().toISOString(), type, runId, data,
         })) as SessionEvent<T>
         metadata.updatedAt = event.time
+        if (type === 'user-ai-input') {
+            metadata.hasUserInput = true
+            this.drafts.delete(sessionId)
+        }
         if (type === 'user-ai-input' && !metadata.title) {
             metadata.title = String((data as { content?: unknown }).content ?? '').replace(/\s+/g, ' ').slice(0, 80)
         }
         const pending = this.pending.get(sessionId) ?? []
         pending.push(event)
         this.pending.set(sessionId, pending)
+        if (this.drafts.has(sessionId)) {
+            // Keep metadata and a bounded tail of terminal context until the first Agent message.
+            let size = pending.reduce((sum, item) => sum + JSON.stringify(item).length, 0)
+            while (pending.length > 1 && (pending.length > 100 || size > 262144)) {
+                size -= JSON.stringify(pending.splice(1, 1)[0]).length
+            }
+            return event
+        }
         this.publishStatus()
         if (!this.failures.has(sessionId)) { await this.drain(sessionId) }
         if (type !== 'ssh-output' && type !== 'ssh-input') { this.changed.next() }
         return event
     }
 
-    async list (): Promise<SessionMetadata[]> {
+    async list (includeEmpty = true): Promise<SessionMetadata[]> {
         await this.ready
-        return [...this.metadata.values()].map(entry => ({ ...entry })).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+        return [...this.metadata.values()].filter(entry => !this.drafts.has(entry.id) && (includeEmpty || entry.hasUserInput))
+            .map(entry => ({ ...entry })).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     }
 
     async rename (sessionId: string, title: string): Promise<void> {
@@ -118,6 +180,7 @@ export class AISessionStore implements OnDestroy {
 
     async read (sessionId: string, limit?: number): Promise<SessionEvent[]> {
         await this.ready
+        if (this.retired.has(sessionId)) { return [] }
         await this.writes.get(sessionId)
         const events = new Map<string, SessionEvent>()
         await this.scan(sessionId, event => { events.set(event.id, event) })
@@ -164,13 +227,21 @@ export class AISessionStore implements OnDestroy {
                 rebuild = true
             }
             const files = await fs.promises.readdir(this.sessionsDirectory)
+            for (const file of files.filter(name => /^[a-zA-Z0-9_-]+\.jsonl\.deleted$/.test(name))) {
+                const id = file.slice(0, -14)
+                this.retired.add(id)
+                this.metadata.delete(id)
+                await fs.promises.rm(this.getSessionPath(id), { force: true })
+            }
             for (const file of files.filter(name => /^[a-zA-Z0-9_-]+\.jsonl$/.test(name))) {
                 const id = file.slice(0, -6)
+                if (this.retired.has(id)) { continue }
                 let entry = this.metadata.get(id)
                 const missing = !entry
                 await this.scan(id, event => {
                     entry ??= { id, createdAt: event.time, updatedAt: event.time, nextSeq: 1 }
                     entry.nextSeq = Math.max(entry.nextSeq, event.seq + 1)
+                    if (event.type === 'user-ai-input') { entry.hasUserInput = true }
                     if (event.time > entry.updatedAt) { entry.updatedAt = event.time }
                     if (event.type === 'session-metadata') {
                         const details = event.data as Partial<SessionDetails>|null
@@ -226,6 +297,7 @@ export class AISessionStore implements OnDestroy {
     private drain (sessionId: string): Promise<void> {
         const previous = this.writes.get(sessionId) ?? Promise.resolve()
         const write = previous.catch(() => undefined).then(async () => {
+            if (this.drafts.has(sessionId) || this.retired.has(sessionId)) { return }
             const pending = this.pending.get(sessionId)
             if (!pending?.length) { return }
             await fs.promises.mkdir(this.sessionsDirectory, { recursive: true })
@@ -272,7 +344,7 @@ export class AISessionStore implements OnDestroy {
                 await fs.promises.copyFile(this.indexPath, this.indexBackupPath)
                 this.indexBackupPath = undefined
             }
-            const entries = [...this.metadata.values()].map(entry => ({ ...entry }))
+            const entries = [...this.metadata.values()].filter(entry => !this.drafts.has(entry.id)).map(entry => ({ ...entry }))
             await fs.promises.mkdir(path.dirname(this.indexPath), { recursive: true })
             const temporaryPath = `${this.indexPath}.tmp`
             await fs.promises.writeFile(temporaryPath, JSON.stringify(entries, null, 2), 'utf8')
@@ -301,7 +373,7 @@ export class AISessionStore implements OnDestroy {
 
     private publishStatus (): void {
         this.persistence.next({
-            pending: [...this.pending.values()].reduce((sum, events) => sum + events.length, 0),
+            pending: [...this.pending].reduce((sum, [id, events]) => sum + (this.drafts.has(id) ? 0 : events.length), 0),
             error: [...new Set(this.failures.values())].join('；'),
             recovered: this.recovered,
         })

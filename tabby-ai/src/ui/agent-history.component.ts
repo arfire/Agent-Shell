@@ -22,6 +22,9 @@ export class AgentHistoryComponent implements OnInit, OnDestroy {
     preview = ''
     query = ''
     allServers = false
+    showEmpty = false
+    checked = new Set<string>()
+    pendingDelete: SessionMetadata[] = []
     busy = false
     error = ''
     notice = ''
@@ -77,7 +80,9 @@ export class AgentHistoryComponent implements OnInit, OnDestroy {
 
     async refresh (): Promise<void> {
         try {
-            this.entries = await this.store.list()
+            this.entries = await this.store.list(this.showEmpty)
+            const ids = new Set(this.entries.map(entry => entry.id))
+            for (const id of this.checked) { if (!ids.has(id)) { this.checked.delete(id) } }
             if (this.selected) { this.selected = this.entries.find(entry => entry.id === this.selected?.id) ?? null }
         } catch (error) { this.error = String(error) }
     }
@@ -85,6 +90,51 @@ export class AgentHistoryComponent implements OnInit, OnDestroy {
     startRename (entry: SessionMetadata): void {
         this.renameId = entry.id
         this.renameText = entry.title ?? ''
+    }
+
+    toggleChecked (id: string): void {
+        if (this.checked.has(id)) { this.checked.delete(id) } else { this.checked.add(id) }
+    }
+
+    get selectedVisible (): SessionMetadata[] {
+        return this.groups.flatMap(group => group.entries).filter(entry => this.checked.has(entry.id))
+    }
+
+    selectVisible (): void {
+        for (const group of this.groups) {
+            for (const entry of group.entries) {
+                if (!this.sessions.deletionBlockReason(entry.id)) { this.checked.add(entry.id) }
+            }
+        }
+    }
+
+    confirmDelete (entry?: SessionMetadata): void {
+        this.pendingDelete = entry ? [entry] : this.selectedVisible
+        this.error = ''
+    }
+
+    async remove (): Promise<void> {
+        if (this.busy || !this.pendingDelete.length) { return }
+        this.busy = true
+        this.error = ''
+        const failures: string[] = []
+        let removed = 0
+        try {
+            for (const entry of this.pendingDelete) {
+                try {
+                    await this.sessions.deleteContext(entry.id)
+                    removed++
+                    this.checked.delete(entry.id)
+                    this.generation++
+                    if (this.selected?.id === entry.id) { this.selected = null; this.preview = ''; this.linking = false }
+                    if (this.renameId === entry.id) { this.renameId = '' }
+                } catch (error) { failures.push(`${entry.title ?? '未命名会话'}：${String(error)}`) }
+            }
+            this.pendingDelete = []
+            this.notice = `已删除 ${removed} 个会话。`
+            await this.refresh()
+            this.error = failures.join('；')
+        } finally { this.busy = false }
     }
 
     async rename (): Promise<void> {

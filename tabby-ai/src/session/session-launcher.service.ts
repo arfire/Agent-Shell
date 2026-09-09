@@ -14,12 +14,14 @@ export class AISessionLauncher {
     async open (entry: SessionMetadata): Promise<BaseTabComponent> {
         const pending = this.opening.get(entry.id)
         if (pending) { return pending }
+        const release = this.sessions.beginOpen(entry.id)
         const opening = this.openSession(entry)
         this.opening.set(entry.id, opening)
-        try { return await opening } finally { this.opening.delete(entry.id) }
+        try { return await opening } finally { this.opening.delete(entry.id); release() }
     }
 
     private async openSession (entry: SessionMetadata): Promise<BaseTabComponent> {
+        if (!await this.sessions.hasHistory(entry.id)) { throw new Error('会话记录不存在或已删除') }
         const runtime = this.sessions.find(entry.id)
         const existing = runtime?.tab ?? this.tabs.get(entry.id)
         if (existing instanceof SSHTabComponent && existing.aiSessionId === entry.id && (this.app.getParentTab(existing) || this.app.tabs.includes(existing))) {
@@ -41,6 +43,7 @@ export class AISessionLauncher {
         if (!params) { throw new Error('无法打开 SSH 连接') }
         params.inputs = { ...params.inputs, aiSessionId: entry.id }
         const tab = this.app.openNewTab(params)
+        if (tab instanceof SSHTabComponent) { this.sessions.trackOpeningTab(tab, entry.id) }
         this.tabs.set(entry.id, tab)
         return tab
     }

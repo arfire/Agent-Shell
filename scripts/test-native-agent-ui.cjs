@@ -83,13 +83,14 @@ async function main () {
     await new Promise(resolve => socket.once('open', resolve))
     let id = 0
     const waiting = new Map()
-    socket.on('message', data => {
+    const handleMessage = data => {
         const message = JSON.parse(data)
         if (waiting.has(message.id)) { waiting.get(message.id)(message); waiting.delete(message.id) }
         if (message.method === 'Runtime.exceptionThrown' || message.method === 'Runtime.consoleAPICalled') {
             fs.appendFileSync(path.join(directory, 'renderer.log'), JSON.stringify(message) + '\n')
         }
-    })
+    }
+    socket.on('message', handleMessage)
     const call = async (method, params = {}) => {
         const current = ++id
         const response = new Promise(resolve => waiting.set(current, resolve))
@@ -110,7 +111,7 @@ async function main () {
             await delay(100)
         }
         fs.writeFileSync(path.join(directory, 'failure.png'), Buffer.from((await call('Page.captureScreenshot', { format: 'png' })).data, 'base64'))
-        console.error(await evaluate('(async()=>{const a=ng.getComponent(document.querySelector("ash-agent-dock"))?.terminal.attachments.get(nativeTest);return JSON.stringify({identity:await window.nativeTest?.sshSession?.probeShell().catch(String), kind:a?.integration.kind, recent:a?.integration.recent, installed:a?.integration.installed, sentBootstrap:a?.integration.sentBootstrap, framing:a?.framing.pending?.buffer})})()'))
+        console.error(await evaluate('JSON.stringify([...document.querySelectorAll("ash-agent-dock")].map(element=>{const dock=ng.getComponent(element),a=dock.terminal.attachments.get(dock.runtime.tab),s=a?.integration;return {name:dock.runtime.tab.profile.name,state:s?.state.value,kind:s?.kind,recent:s?.recent.slice(-1200),installed:s?.installed,sentBootstrap:s?.sentBootstrap,alternateScreen:s?.alternateScreen,ready:s?.ready,failure:s?.failureReason.value}}))'))
         throw new Error('Timed out: ' + label + '; ' + await evaluate('document.body.innerText.slice(-2000)'))
     }
     await wait('!!window.ng?.getComponent?.(document.querySelector("app-root"))?.ready', 'Angular bootstrap')
@@ -281,6 +282,34 @@ async function main () {
     await inZone('ng.getComponent(document.querySelector("workspace-sidebar")).select("agent");return true')
     await wait('!!ng.getComponent(document.querySelector("agent-history"))?.entries.length', 'Agent history list')
     const oldContext = await evaluate('ng.getComponent(document.querySelector("ash-agent-dock")).runtime.id')
+    // Use the real history controls: connected records stay protected, including Shell mode.
+    assert.equal(await evaluate(`(() => {
+        const history=ng.getComponent(document.querySelector('agent-history'))
+        const row=[...document.querySelectorAll('agent-history .session-row')].find(row=>row.querySelector('.session small')?.textContent.includes('当前'))
+        return !!history.sessions.deletionBlockReason(history.runtime.id) && row.querySelector('[aria-label="删除会话"]').disabled
+    })()`), true)
+    await inZone(`
+        const history=ng.getComponent(document.querySelector('agent-history'))
+        window.qaEmptyIds=[]
+        for(const title of ['QA 空记录 A','QA 空记录 B']) {
+            qaEmptyIds.push(await history.store.createSession({title,host:'127.0.0.1',user:'ash${testShell}',port:${Number(process.env.ASH_TEST_SSH_PORT)}}))
+        }
+        await history.refresh()
+        return true
+    `)
+    assert.equal(await evaluate('ng.getComponent(document.querySelector("agent-history")).entries.some(entry=>qaEmptyIds.includes(entry.id))'), false)
+    await evaluate('document.querySelector("agent-history [aria-label=显示空会话]").click();true')
+    await wait('ng.getComponent(document.querySelector("agent-history")).entries.filter(entry=>qaEmptyIds.includes(entry.id)).length===2', 'show legacy empty sessions')
+    await evaluate(`for(const row of document.querySelectorAll('agent-history .session-row')) {
+        if(row.querySelector('.session span')?.textContent.includes('QA 空记录')) row.querySelector('input[type=checkbox]').click()
+    };true`)
+    await evaluate(`[...document.querySelectorAll('agent-history button')].find(button=>button.textContent.includes('删除所选')).click();true`)
+    await wait('ng.getComponent(document.querySelector("agent-history")).pendingDelete.length===2', 'batch delete confirmation')
+    await screen('empty-session-delete-confirmation')
+    await evaluate(`[...document.querySelectorAll('agent-history button')].find(button=>button.textContent.trim()==='确认删除').click();true`)
+    await wait('!ng.getComponent(document.querySelector("agent-history")).busy && !ng.getComponent(document.querySelector("agent-history")).entries.some(entry=>qaEmptyIds.includes(entry.id))', 'batch deletion completed')
+    assert.equal(await evaluate('ng.getComponent(document.querySelector("agent-history")).entries.some(entry=>entry.id===' + JSON.stringify(oldContext) + ')'), true)
+    await evaluate('document.querySelector("agent-history [aria-label=显示空会话]").click();true')
     await inZone('const history=ng.getComponent(document.querySelector("agent-history"));history.startRename(history.entries.find(e=>e.id===' + JSON.stringify(oldContext) + '));history.renameText="我的排障记录";await history.rename();return true')
     await wait('ng.getComponent(document.querySelector("agent-history")).entries.some(e=>e.title==="我的排障记录")', 'custom session title persisted')
     await inZone('const history=ng.getComponent(document.querySelector("agent-history"));await history.inspect(history.entries.find(e=>e.id===' + JSON.stringify(oldContext) + '));return true')
@@ -353,6 +382,17 @@ async function main () {
     await ready()
     await send('重连后测试\r')
     await wait('!ng.getComponent(document.querySelector("ash-agent-dock")).runtime.activeRunId && ng.getComponent(document.querySelector("ash-agent-dock")).runtime.state.value === "DONE"', 'Agent after reconnect')
+    // Inject a known failure, then drive the actual explanation and retry buttons.
+    await inZone(`const dock=ng.getComponent(document.querySelector('ash-agent-dock'));dock.terminal.attachments.get(nativeTest).integration.fail('QA：未能确认提示符');return true`)
+    await wait('!!document.querySelector("ash-agent-dock .retry-integration") && !ng.getComponent(document.querySelector("ash-agent-dock")).terminal.attachments.get(nativeTest).integration.installed', 'integration failure controls')
+    assert.match(await evaluate('document.querySelector("ash-agent-dock .mode-button").textContent'), /Shell 模式/)
+    await evaluate(`[...document.querySelectorAll('ash-agent-dock button')].find(button=>button.textContent.trim()==='查看原因').click();true`)
+    await wait('document.querySelector("ash-agent-dock pre")?.textContent.includes("QA：未能确认提示符")', 'failure reason visible')
+    await screen('integration-failure-retry')
+    await evaluate('document.querySelector("ash-agent-dock .retry-integration").click();true')
+    await wait('ng.getComponent(document.querySelector("ash-agent-dock")).runtime.terminal.value.state === "initializing"', 'retry awaits an empty prompt')
+    await send('\r')
+    await ready()
     await send('停止测试\r')
     await wait('!!document.querySelector("ash-agent-dock textarea")', 'stop test approval')
     await evaluate('document.querySelector("ash-agent-dock .btn-primary").click(); true')
@@ -474,14 +514,53 @@ async function main () {
     await wait('!ng.getComponent(document.querySelector("ash-agent-dock")).runtime.activeRunId && ng.getComponent(document.querySelector("ash-agent-dock")).runtime.state.value === "DONE"', 'legacy full mode rejects configured denied command')
     assert.equal(await evaluate('ng.getComponent(document.querySelector("ash-agent-dock")).runtime.events.value.some(e=>e.type==="approval" && e.data.automatic && e.data.permissionMode==="full" && e.data.risk==="DENY")'), false)
     await inZone('await qaAISettings.configService.save(qaOriginalAIConfig);await ng.getComponent(document.querySelector("ash-agent-dock")).changePermission("");return true')
-    console.log('PASS Electron + SSH (' + testShell + '): input privacy, native output, approval, sensitive Dock, original mode')
+    // Restart the real app with the same isolated data, then reopen a saved transcript.
+    const beforeRestart = requests.length
+    await inZone(`
+        await qaSessionStore.retrySaving()
+        const app=nativeTestInjector.get(require('tabby-core').AppService)
+        await app.closeTab(app.getParentTab(nativeTest) ?? nativeTest)
+        return true
+    `)
+    await delay(300)
+    socket.close()
+    const exited = new Promise(resolve => electron.once('exit', resolve))
+    electron.kill()
+    await exited
+    electron = spawn(path.join(root, 'node_modules/electron/dist/electron.exe'), [bootstrap, '--remote-debugging-port=' + port], {
+        cwd: root, windowsHide: true, stdio: ['ignore', log, log],
+        env: { ...process.env, TABBY_DEV: '1', TABBY_DATA_DIRECTORY: directory, TABBY_CONFIG_DIRECTORY: directory },
+    })
+    target = null
+    for (let tries = 0; tries < 300; tries++) {
+        try { target = (await (await fetch('http://127.0.0.1:' + port + '/json')).json()).find(item => item.type === 'page'); if (target) break } catch {}
+        await delay(200)
+    }
+    if (!target) throw new Error('Restarted Electron did not expose a page')
+    socket = new WebSocket(target.webSocketDebuggerUrl)
+    await new Promise(resolve => socket.once('open', resolve))
+    socket.on('message', handleMessage)
+    await call('Runtime.enable')
+    await wait('!!window.ng?.getComponent?.(document.querySelector("app-root"))?.ready', 'restarted Angular app')
+    await evaluate('window.nativeTestInjector=ng.getInjector(document.querySelector("app-root"));true')
+    await inZone('ng.getComponent(document.querySelector("workspace-sidebar")).select("agent");return true')
+    await wait('!!ng.getComponent(document.querySelector("agent-history"))?.entries.some(entry=>entry.title==="我的排障记录")', 'history persisted across app restart')
+    assert.equal(await evaluate('(async()=> (await ng.getComponent(document.querySelector("agent-history")).store.list()).some(entry=>entry.title?.startsWith("QA 空记录")))()'), false)
+    await evaluate(`[...document.querySelectorAll('agent-history button.session')].find(button=>button.textContent.includes('我的排障记录')).click();true`)
+    await wait('!!ng.getComponent(document.querySelector("agent-history"))?.sessions.find(' + JSON.stringify(oldContext) + ')?.terminal.value.ready && !ng.getComponent(document.querySelector("agent-history")).busy', 'target SSH reopened after app restart')
+    await evaluate('window.nativeTest=ng.getComponent(document.querySelector("agent-history")).sessions.find(' + JSON.stringify(oldContext) + ').tab;true')
+    assert.equal(await evaluate('nativeTest.aiSessionId'), oldContext)
+    assert.match(await terminalText(), /当前终端工作正常/)
+    assert.equal(requests.length, beforeRestart, 'App restart replay started a model request')
+    await screen('history-after-app-restart')
+    console.log('PASS Electron + SSH (' + testShell + '): input privacy, connection isolation, empty-history deletion, connected deletion guard, retry, reconnect and app restart')
     console.log('Screenshots and isolated data:', directory)
     fs.writeFileSync(path.join(root, '.build-cache/native-agent-ui-latest.txt'), directory)
     await evaluate('nativeTest.session.destroy(); true')
     await delay(300)
     void evaluate('require("@electron/remote").app.exit(0)')
 }
-const timeout = setTimeout(() => { console.error('UI test timed out:', directory); socket?.close(); electron?.kill(); model.close(); process.exitCode = 1 }, 240000)
+const timeout = setTimeout(() => { console.error('UI test timed out:', directory); socket?.close(); electron?.kill(); model.close(); process.exitCode = 1 }, 360000)
 main().catch(error => { console.error(error); console.error('Test data:', directory); process.exitCode = 1 }).finally(() => {
     clearTimeout(timeout); socket?.close(); electron?.kill(); model.close()
 })

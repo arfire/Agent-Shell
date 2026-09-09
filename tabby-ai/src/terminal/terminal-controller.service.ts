@@ -61,6 +61,7 @@ export class TerminalControllerService {
             ready: input.canCapture,
             notice: integration.notice.value,
             state: integration.state.value,
+            failureReason: integration.failureReason.value,
         })
         const pasteListener = (event: ClipboardEvent): void => {
             if (input.pasteText(event.clipboardData?.getData('text/plain') ?? '')) {
@@ -93,7 +94,7 @@ export class TerminalControllerService {
                     integration.promptText = buffer.getLine(buffer.baseY + buffer.cursorY)?.translateToString(false, 0, buffer.cursorX) ?? ''
                 }
             }),
-            integration.notice.subscribe(update), runtime.state.subscribe(update),
+            integration.notice.subscribe(update), integration.failureReason.subscribe(update), runtime.state.subscribe(update),
             tab.alternateScreenActive$.subscribe(active => integration.setAlternateScreen(active)),
             session.closed$.subscribe(() => {
                 runtime.stopAgent?.()
@@ -130,7 +131,7 @@ export class TerminalControllerService {
                 }
             }).catch(error => {
                 if (this.attachments.get(tab)?.integration === integration) {
-                    integration.fail('Shell 集成不可用，已切回原本模式：' + String(error))
+                    integration.fail('Shell 集成不可用，已切回 Shell 模式：' + String(error))
                 }
             })
         }))
@@ -173,7 +174,7 @@ export class TerminalControllerService {
             runtime.locked = false
             const message = running
                 ? 'Agent 已停止后续操作，当前程序仍在运行，终端已交由你控制；如需中断，请按 Ctrl+C。'
-                : '已切回原本模式，键盘输入直接发送 Shell。'
+                : '已切回 Shell 模式，键盘输入直接发送 Shell。'
             attachment.integration.notice.next(message)
             this.toastr.info(message)
         }
@@ -181,6 +182,24 @@ export class TerminalControllerService {
 
     isExecuting (runtime: AISessionRuntime): boolean {
         return this.attachments.get(runtime.tab)?.framing.isExecuting ?? false
+    }
+
+    async retryIntegration (runtime: AISessionRuntime): Promise<void> {
+        const attachment = this.attachments.get(runtime.tab)
+        if (!attachment || !!runtime.activeRunId || runtime.locked || attachment.framing.isExecuting ||
+            !attachment.session.open || attachment.integration.state.value !== 'unavailable') { return }
+        attachment.integration.enable()
+        try {
+            const identity = await runtime.tab.sshSession?.probeShell()
+            if (this.attachments.get(runtime.tab) !== attachment) { return }
+            const kind = detectShellKind(identity ?? '')
+            runtime.shellKind = kind ?? undefined
+            attachment.integration.setShell(kind)
+        } catch (error) {
+            if (this.attachments.get(runtime.tab) === attachment) {
+                attachment.integration.fail('无法识别 Shell，已切回 Shell 模式：' + String(error))
+            }
+        }
     }
 
     canRestoreHistory (runtime: AISessionRuntime): boolean {

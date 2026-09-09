@@ -32,7 +32,8 @@ function load (file) {
         if (id === '@angular/core') return { Injectable: () => value => value, Component: () => value => value, Input: () => () => undefined }
         if (id === 'tabby-core') return { SubscriptionContainer }
         if (id === 'tabby-terminal') return { ...load('tabby-terminal/src/api/middleware.ts'), XTermFrontend }
-        if (id.startsWith('!!raw-loader!')) return { default: fs.readFileSync(path.resolve(path.dirname(filename), id.slice(13)), 'utf8') }
+        // Simulate a Windows checkout even when the tests run on Unix.
+        if (id.startsWith('!!raw-loader!')) return { default: fs.readFileSync(path.resolve(path.dirname(filename), id.slice(13)), 'utf8').replace(/\r?\n/g, '\r\n') }
         if (id.startsWith('.')) return load(path.resolve(path.dirname(filename), id + '.ts'))
         return require(id)
     }
@@ -79,10 +80,77 @@ async function fixture () {
 }
 
 async function main () {
+    await test('shell bootstrap normalizes Windows script line endings before encoding', () => {
+        for (const kind of ['bash', 'zsh', 'fish', 'powershell']) {
+            const command = shellBootstrap(kind, 'newline-test')
+            const encoded = command.match(/'([A-Za-z0-9+/=]{40,})'/)?.[1]
+            assert.ok(encoded, kind)
+            const script = Buffer.from(encoded, 'base64').toString('utf8')
+            assert.ok(script.includes('\n'), kind)
+            assert.ok(!script.includes('\r'), kind)
+            assert.ok(script.includes('newline-test'), kind)
+            assert.ok(!script.includes('__NONCE__'), kind)
+            assert.ok(command.endsWith('\r'), 'terminal Enter must be preserved')
+        }
+    })
     await load('tabby-ai/src/ui/agent-dock.component.spec.ts').runTests(test)
+    await test('Fish startup screen probes and ST-terminated prompt markers preserve bootstrap detection', () => {
+        const integration = new ShellIntegration(async () => {})
+        const sent = []
+        integration.outputToSession$.subscribe(value => sent.push(value.toString()))
+        try {
+            integration.setShell('fish')
+            integration.setAlternateScreen(true)
+            integration.feedFromSession(Buffer.from('\x1b]133;A\x1b\\user@host ~> \x1b]133;B\x07'))
+            assert.equal(sent.length, 0)
+            integration.setAlternateScreen(false)
+            assert.equal(sent.length, 1)
+            assert.equal(integration.state.value, 'initializing')
+        } finally { integration.close() }
+    })
+    await test('failed bootstrap exposes its cause without dumping encoded commands, and retry waits for a prompt', () => {
+        const integration = new ShellIntegration(async () => {})
+        const sent = [], shown = []
+        integration.outputToSession$.subscribe(value => sent.push(value.toString()))
+        integration.outputToTerminal$.subscribe(value => shown.push(value.toString()))
+        try {
+            integration.setShell('bash')
+            integration.feedFromSession(Buffer.from('test@host:~$ '))
+            assert.equal(sent.length, 1)
+            integration.feedFromSession(Buffer.from('eval ENCODED_BOOTSTRAP\r\n-bash: syntax error near unexpected token\r\n'))
+            integration.feedFromSession(Buffer.from('\x1b['))
+            integration.feedFromSession(Buffer.from('6n\x1b]11;?\x1b\\'))
+            assert.ok(shown.includes('\x1b[6n'))
+            assert.ok(shown.includes('\x1b]11;?\x1b\\'))
+            assert.ok(!shown.join('').includes('ENCODED_BOOTSTRAP'))
+            integration.fail('未能确认提示符，已切回 Shell 模式')
+            assert.match(integration.failureReason.value, /syntax error/)
+            assert.ok(!shown.join('').includes('ENCODED_BOOTSTRAP'))
+            assert.equal(integration.mode.value, 'shell')
+            integration.enable()
+            assert.equal(integration.failureReason.value, '')
+            assert.equal(sent.length, 1, 'Retry must not submit a partially edited remote line')
+            integration.feedFromSession(Buffer.from('test@host:~$ '))
+            assert.equal(sent.length, 2)
+        } finally { integration.close() }
+    })
+    await load('tabby-ai/src/session/ai-session.service.spec.ts').runTests(test)
     await load('tabby-ai/src/policy/credential-guard.spec.ts').runTests(test, defaults)
     await load('tabby-ai/src/policy/execution-boundary.spec.ts').runTests(test, defaults)
     await load('tabby-ai/src/terminal/ai-input.middleware.spec.ts').runTests(test, fixture)
+    await test('terminal color and capability replies do not end Fish bootstrap while its startup screen probe is active', async () => {
+        const f = await fixture()
+        try {
+            f.integration.state.next('initializing')
+            f.integration.setAlternateScreen(true)
+            for (const reply of ['\x1b]11;rgb:1616/1616/1616\x1b\\', '\x1bP1+r696e646e=1b5b53\x1b\\']) {
+                f.input.feedFromTerminal(Buffer.from(reply))
+                assert.equal(f.integration.state.value, 'initializing')
+                assert.equal(f.sent.at(-1), reply)
+            }
+            assert.deepEqual(f.agent, [])
+        } finally { f.close() }
+    })
     const { approvalAction, AgentPermissionsService } = load('tabby-ai/src/policy/agent-permissions.service.ts')
     const { CommandPolicyService } = load('tabby-ai/src/policy/command-policy.service.ts')
     const { AgentService } = load('tabby-ai/src/agent/agent.service.ts')

@@ -21,6 +21,7 @@ export class AgentDockComponent implements OnInit, OnDestroy {
     values = new Map<string, string>()
     confirmed = new Set<string>()
     changingPermission = false
+    showFailure = false
     private subscriptions: Subscription[] = []
 
     constructor (
@@ -119,6 +120,12 @@ export class AgentDockComponent implements OnInit, OnDestroy {
 
     async toggleMode (): Promise<void> {
         await this.terminal.setMode(this.runtime, this.runtime.terminal.value.mode === 'agent' ? 'shell' : 'agent')
+        this.runtime.tab.frontend?.focus()
+    }
+
+    async retryIntegration (): Promise<void> {
+        this.showFailure = false
+        await this.terminal.retryIntegration(this.runtime)
         this.runtime.tab.frontend?.focus()
     }
 

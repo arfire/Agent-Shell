@@ -12,6 +12,20 @@
             |  全部服务器
         button.btn.btn-sm.btn-link((click)='refresh()') 刷新
         button.btn.btn-sm.btn-link((click)='load()', [disabled]='disabled') 新建
+    label.small.mt-2
+        input(type='checkbox', [(ngModel)]='showEmpty', (ngModelChange)='refresh()', [disabled]='busy', aria-label='显示空会话')
+        |  显示空会话
+    .d-flex.flex-wrap
+        button.btn.btn-sm.btn-link((click)='selectVisible()', [disabled]='busy') 选择可删除项
+        button.btn.btn-sm.btn-link((click)='checked.clear()', [disabled]='busy || !checked.size') 清除选择
+        button.btn.btn-sm.btn-link.text-danger((click)='confirmDelete()', [disabled]='busy || !selectedVisible.length') 删除所选（{{selectedVisible.length}}）
+    .p-2(*ngIf='pendingDelete.length', role='alert')
+        .small 以下 {{pendingDelete.length}} 个会话的历史记录将永久删除：
+        ul.small
+            li(*ngFor='let entry of pendingDelete') {{entry.title || '未命名会话'}} · {{entry.user}}@{{entry.host}}
+        .small 正在使用或仍关联 SSH 连接的会话不会删除。
+        button.btn.btn-sm.btn-danger.mt-1((click)='remove()', [disabled]='busy') 确认删除
+        button.btn.btn-sm.btn-link.mt-1((click)='pendingDelete = []', [disabled]='busy') 取消
     .small.text-muted(*ngIf='runtime?.activeRunId') 请先停止当前 Agent，再切换会话。
     .small.text-warning.text-break(*ngIf='notice') {{notice}}
     .small.text-danger.text-break(*ngIf='error', role='alert') {{error}}
@@ -19,13 +33,16 @@
     details(*ngFor='let group of groups; trackBy: groupKey', open)
         summary {{group.name}}
         .session-row(*ngFor='let entry of group.entries; trackBy: entryKey')
+            input(type='checkbox', [checked]='checked.has(entry.id)', (change)='toggleChecked(entry.id)', [disabled]='busy || !!sessions.deletionBlockReason(entry.id)', [attr.aria-label]='"选择会话：" + (entry.title || "未命名会话")', [title]='sessions.deletionBlockReason(entry.id)')
             button.session((click)='open(entry)', [disabled]='busy', [class.selected]='selected?.id === entry.id')
                 span {{entry.title || '未命名会话'}}
-                small {{entry.updatedAt | date:'MM-dd HH:mm'}}{{runtime?.id === entry.id ? ' · 当前' : ''}}
+                small {{entry.updatedAt | date:'MM-dd HH:mm'}}{{runtime?.id === entry.id ? ' · 当前' : ''}}{{!entry.hasUserInput ? ' · 空会话' : ''}}
             button.btn.btn-sm.btn-link((click)='startRename(entry)', aria-label='重命名会话', title='重命名会话')
                 i.fas.fa-pen
             button.btn.btn-sm.btn-link((click)='inspect(entry)', aria-label='预览记录', title='预览记录')
                 i.fas.fa-eye
+            button.btn.btn-sm.btn-link.text-danger((click)='confirmDelete(entry)', [disabled]='busy || !!sessions.deletionBlockReason(entry.id)', aria-label='删除会话', [title]='sessions.deletionBlockReason(entry.id) || "删除会话"')
+                i.fas.fa-trash
             .input-group.p-1(*ngIf='renameId === entry.id')
                 input.form-control.form-control-sm([(ngModel)]='renameText', maxlength='80', aria-label='会话名称', (keydown.enter)='rename()', (keydown.escape)='renameId = ""')
                 button.btn.btn-sm.btn-primary((click)='rename()') 保存

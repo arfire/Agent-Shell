@@ -1,0 +1,2 @@
+tabby-ai/src/terminal/shell-integration/*.sh text eol=lf
+tabby-ai/src/terminal/shell-integration/*.fish text eol=lf

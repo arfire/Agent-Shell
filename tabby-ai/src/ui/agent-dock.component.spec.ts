@@ -77,7 +77,10 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
     })
     await test('simultaneously restored SSH tabs never share a live history owner or connection id', async () => {
         let created = 0
-        const store = { createSession: async () => 'new-' + ++created, ensureSession: async (id: string) => id, read: async () => [] }
+        const store = {
+            createDraft: async () => 'new-' + ++created, list: async () => [{ id: 'restored' }],
+            discardDraft: () => undefined, read: async () => [],
+        }
         const sessions = new AISessionService(store as any, {} as any)
         const tab = () => ({ aiSessionId: 'restored', profile: { id: 'profile', name: 'SSH', options: { host: 'example', user: 'tester' } } })
         const [a, b] = await Promise.all([sessions.attach(tab() as any), sessions.attach(tab() as any)])

@@ -7,6 +7,72 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
     const directory = await fs.promises.mkdtemp(path.resolve('.build-cache/ai-store-test-'))
     const log = { create: () => ({ error: () => undefined, warn: () => undefined }) }
     const create = (name: string): AISessionStore => new AISessionStore({ directory: path.join(directory, name) } as any, log as any)
+    await test('SSH-only drafts stay in memory, retain bounded context and persist on the first Agent message', async () => {
+        const store = create('draft')
+        try {
+            const id = await store.createDraft({ host: 'draft.test' })
+            for (let i = 0; i < 120; i++) { await store.append(id, 'ssh-output', { content: `line ${i}` }) }
+            await store.retrySaving()
+            assert.deepEqual(await store.list(), [])
+            assert.equal(fs.existsSync(path.join(directory, 'draft', 'sessions', `${id}.jsonl`)), false)
+            assert.equal(store.persistence.value.pending, 0)
+            assert.ok((await store.read(id)).length <= 100)
+            await Promise.all([
+                store.append(id, 'user-ai-input', { content: '检查状态' }),
+                store.append(id, 'ssh-output', { content: 'concurrent output' }),
+            ])
+            const entries = await store.list(false)
+            assert.equal(entries.length, 1)
+            assert.equal(entries[0].title, '检查状态')
+            assert.equal(entries[0].host, 'draft.test')
+            const events = await store.read(id)
+            assert.ok(events.some(e => (e.data as any).content === 'line 119'))
+            assert.equal(events.filter(e => e.type === 'user-ai-input').length, 1)
+            assert.equal(new Set(events.map(e => e.seq)).size, events.length)
+            const discarded = await store.createDraft()
+            const late = store.append(discarded, 'ssh-output', { content: 'late' })
+            store.discardDraft(discarded)
+            await late
+            assert.equal(fs.existsSync(path.join(directory, 'draft', 'sessions', `${discarded}.jsonl`)), false)
+        } finally { store.ngOnDestroy() }
+    })
+    await test('deletion removes history, rejects delayed writes and survives stale index recovery', async () => {
+        let store = create('delete')
+        const base = path.join(directory, 'delete')
+        const id = await store.createSession({ host: 'delete.test' })
+        await store.append(id, 'user-ai-input', { content: 'delete me' })
+        await store.retrySaving()
+        const oldIndex = await fs.promises.readFile(path.join(base, 'sessions.json'))
+        try {
+            await Promise.all([store.append(id, 'ssh-output', { content: 'in flight' }), store.deleteSession(id)])
+            await store.append(id, 'ssh-output', { content: 'late' })
+            await store.retrySaving()
+            assert.deepEqual(await store.list(), [])
+            assert.equal(fs.existsSync(path.join(base, 'sessions', `${id}.jsonl`)), false)
+            assert.deepEqual(await store.read(id), [])
+            store.ngOnDestroy()
+            await fs.promises.writeFile(path.join(base, 'sessions.json'), oldIndex)
+            store = create('delete')
+            assert.deepEqual(await store.list(), [])
+            await store.append(id, 'user-ai-input', { content: 'stale writer' })
+            assert.equal(fs.existsSync(path.join(base, 'sessions', `${id}.jsonl`)), false)
+        } finally { store.ngOnDestroy() }
+    })
+    await test('legacy SSH-only histories remain stored but are hidden from conversation lists', async () => {
+        let store = create('empty-history')
+        const empty = await store.createSession()
+        await store.append(empty, 'ssh-output', { content: 'welcome' })
+        const active = await store.createSession()
+        await store.append(active, 'user-ai-input', { content: 'hello' })
+        await store.retrySaving()
+        store.ngOnDestroy()
+        store = create('empty-history')
+        try {
+            assert.equal((await store.list()).length, 2)
+            assert.deepEqual((await store.list(false)).map(entry => entry.id), [active])
+            assert.ok((await store.read(empty)).length)
+        } finally { store.ngOnDestroy() }
+    })
     await test('failed append retains data, retries in order and does not block later history reads', async () => {
         const store = create('retry')
         const id = await store.createSession({ host: 'example.test', user: 'qa', profileId: 'qa' })

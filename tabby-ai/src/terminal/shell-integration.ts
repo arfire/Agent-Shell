@@ -26,7 +26,8 @@ export function detectShellKind (identity: string): ShellKind|null {
 }
 
 export function shellBootstrap (kind: ShellKind, nonce: string): string {
-    const script = scripts[kind].replaceAll('__NONCE__', nonce)
+    // raw-loader preserves Windows checkout line endings, which POSIX shells reject.
+    const script = scripts[kind].replace(/\r\n?/g, '\n').replaceAll('__NONCE__', nonce)
     if (kind === 'powershell') {
         return ` . ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(script).toString('base64')}'))))\r`
     }
@@ -41,6 +42,7 @@ export class ShellIntegration extends SessionMiddleware {
     readonly mode = new BehaviorSubject<TerminalMode>('agent')
     readonly state = new BehaviorSubject<ShellState>('initializing')
     readonly notice = new BehaviorSubject('正在连接 Shell…')
+    readonly failureReason = new BehaviorSubject('')
     readonly prompt = new Subject<void>()
     readonly command = new Subject<string>()
     readonly commandFinished = new Subject<number>()
@@ -69,13 +71,13 @@ export class ShellIntegration extends SessionMiddleware {
 
     constructor (private drain: () => Promise<void>) {
         super()
-        this.timer = setTimeout(() => this.fail('未能确认 Shell 就绪，已切回原本模式'), 12000)
+        this.timer = setTimeout(() => this.fail('未能确认 Shell 就绪，已切回 Shell 模式'), 12000)
     }
 
     setShell (kind: ShellKind|null): void {
         this.kind = kind
         if (!kind) {
-            this.fail('当前 Shell 暂不支持 Agent 自动识别，已切回原本模式')
+            this.fail('当前 Shell 暂不支持 Agent 自动识别，已切回 Shell 模式')
         } else {
             this.tryBootstrap()
         }
@@ -129,10 +131,12 @@ export class ShellIntegration extends SessionMiddleware {
 
     setAlternateScreen (active: boolean): void {
         this.alternateScreen = active
-        if (active) {
+        // Fish probes terminal capabilities with a brief alternate-screen round trip at startup.
+        if (active && this.state.value !== 'initializing') {
             this.commandStarted()
             this.notice.next('交互程序正在接管终端，键盘直接发送远端')
         }
+        if (!active) { this.tryBootstrap() }
     }
 
     async waitForPrompt (signal?: AbortSignal): Promise<void> {
@@ -189,6 +193,7 @@ export class ShellIntegration extends SessionMiddleware {
     }
 
     enable (): void {
+        this.failureReason.next('')
         if (this.uninstalling) {
             this.enableAfterUninstall = true
             this.notice.next('正在清理上一次 Shell 集成，完成后重新启用')
@@ -205,7 +210,7 @@ export class ShellIntegration extends SessionMiddleware {
         this.state.next('initializing')
         this.notice.next('请在空提示符下按 Enter，准备 Agent 模式')
         clearTimeout(this.timer)
-        this.timer = setTimeout(() => this.fail('未能确认空提示符，已切回原本模式'), 12000)
+        this.timer = setTimeout(() => this.fail('未能确认空提示符，已切回 Shell 模式'), 12000)
     }
 
     fail (message: string): void {
@@ -213,12 +218,16 @@ export class ShellIntegration extends SessionMiddleware {
         clearTimeout(this.promptTimer)
         // Never inject cleanup into a running program or a partially edited remote line.
         // A late READY/B still triggers the pending cleanup after a failed bootstrap.
+        const errors = this.hidden.split(/[\r\n]+/).filter(line => /syntax error|command not found|not found|error:/i.test(line))
+            .map(line => line.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/[\x00-\x1f\x7f-\x9f]/g, '').slice(0, 500)).slice(-4)
+        this.failureReason.next([message, ...errors].join('\n'))
         this.disable()
         this.ready = false
         this.state.next('unavailable')
         this.notice.next(message)
         if (this.hidden) {
-            this.outputToTerminal.next(Buffer.from(this.hidden))
+            // Keep the failed, encoded installation command out of the user's terminal.
+            if (errors.length) { this.outputToTerminal.next(Buffer.from('\r\n' + errors.join('\r\n') + '\r\n')) }
             this.hidden = ''
         }
     }
@@ -235,6 +244,7 @@ export class ShellIntegration extends SessionMiddleware {
         this.state.complete()
         this.mode.complete()
         this.notice.complete()
+        this.failureReason.complete()
         super.close()
     }
 
@@ -256,6 +266,12 @@ export class ShellIntegration extends SessionMiddleware {
         if (!text) { return }
         if (this.sentBootstrap && !this.installed && this.state.value === 'initializing') {
             this.hidden = (this.hidden + text).slice(-32768)
+            // Fish can query cursor position after drawing its prompt but before reading our command.
+            // Forward complete queries (including ones split across chunks) while hiding command echo.
+            this.hidden = this.hidden.replace(/\x1b\[[?=>\d;]*[cnuq]|\x1b\[\??\d+\$p|\x1b\](?:10|11|12);\?(?:\x07|\x1b\\)|\x1bP\+q[\da-fA-F;]+\x1b\\/g, query => {
+                this.outputToTerminal.next(Buffer.from(query))
+                return ''
+            })
             return
         }
         if (this.capturingPrompt) {

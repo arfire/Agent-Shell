@@ -34,4 +34,5 @@ export interface SessionMetadata {
     port?: number
     title?: string
     nextSeq: number
+    hasUserInput?: boolean
 }

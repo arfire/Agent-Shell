@@ -29,6 +29,7 @@ export interface AISessionRuntime {
         ready: boolean
         notice: string
         state: string
+        failureReason?: string
     }>
 }
 
@@ -37,6 +38,8 @@ export class AISessionService {
     private readonly sessions = new Map<SSHTabComponent, AISessionRuntime>()
     private readonly pendingAttachments = new Map<SSHTabComponent, Promise<AISessionRuntime>>()
     private readonly loadingContexts = new Set<string>()
+    private readonly openingContexts = new Set<string>()
+    private readonly openingTabs = new Map<SSHTabComponent, string>()
 
     constructor (
         private store: AISessionStore,
@@ -44,6 +47,7 @@ export class AISessionService {
     ) { }
 
     async attach (tab: SSHTabComponent): Promise<AISessionRuntime> {
+        this.openingTabs.delete(tab)
         const existing = this.sessions.get(tab)
         if (existing) {
             return existing
@@ -76,7 +80,8 @@ export class AISessionService {
         let id = ''
         let events: SessionEvent[] = []
         try {
-            id = canRestore ? await this.store.ensureSession(requestedId, details) : await this.store.createSession(details)
+            const exists = canRestore && (await this.store.list()).some(entry => entry.id === requestedId)
+            id = exists ? requestedId : await this.store.createDraft(details)
             events = await this.store.read(id)
         } catch (error) {
             if (canRestore) { this.loadingContexts.delete(requestedId) }
@@ -88,7 +93,7 @@ export class AISessionService {
             connectionId: crypto.randomUUID(),
             tab,
             events: new BehaviorSubject(events),
-            historyToRestore: events.length ? events : undefined,
+            historyToRestore: events.some(event => event.type !== 'session-metadata') ? events : undefined,
             liveText: new BehaviorSubject(''),
             state: new BehaviorSubject('IDLE'),
             locked: false,
@@ -101,6 +106,8 @@ export class AISessionService {
 
     detach (tab: SSHTabComponent): void {
         const runtime = this.sessions.get(tab)
+        runtime?.flushOutput?.()
+        if (runtime) { this.store.discardDraft(runtime.id) }
         runtime?.events.complete()
         runtime?.liveText.complete()
         runtime?.state.complete()
@@ -116,6 +123,22 @@ export class AISessionService {
         return [...this.sessions.values()].find(runtime => runtime.id === sessionId)
     }
 
+    beginOpen (id: string): () => void {
+        if (this.loadingContexts.has(id)) { throw new Error('会话正在切换或删除，请稍后重试') }
+        this.openingContexts.add(id)
+        return () => this.openingContexts.delete(id)
+    }
+
+    async hasHistory (id: string): Promise<boolean> {
+        return (await this.store.list()).some(entry => entry.id === id)
+    }
+
+    trackOpeningTab (tab: SSHTabComponent, id: string): void {
+        if (this.sessions.has(tab) || this.pendingAttachments.has(tab)) { return }
+        this.openingTabs.set(tab, id)
+        tab.destroyed$.subscribe(() => this.openingTabs.delete(tab))
+    }
+
     async selectContext (runtime: AISessionRuntime, sessionId?: string): Promise<void> {
         if (!!runtime.activeRunId || runtime.locked) { throw new Error('请先停止当前 Agent，再切换会话') }
         if (sessionId === runtime.id) { return }
@@ -129,7 +152,7 @@ export class AISessionService {
         try {
             const entries = await this.store.list()
             if (sessionId && !entries.some(entry => entry.id === sessionId)) { throw new Error('会话记录不存在') }
-            const id = sessionId ?? await this.store.createSession({
+            const id = sessionId ?? await this.store.createDraft({
                 profileId: runtime.tab.profile.id,
                 profileName: runtime.tab.profile.name,
                 host: runtime.tab.profile.options.host,
@@ -137,7 +160,11 @@ export class AISessionService {
                 port: runtime.tab.profile.options.port ?? 22,
             })
             const events = await this.store.read(id)
-            if (this.sessions.get(runtime.tab) !== runtime) { throw new Error('终端已关闭') }
+            if (this.sessions.get(runtime.tab) !== runtime) {
+                this.store.discardDraft(id)
+                throw new Error('终端已关闭')
+            }
+            this.store.discardDraft(runtime.id)
             runtime.id = id
             runtime.tab.aiSessionId = id
             runtime.events.next(events)
@@ -157,8 +184,54 @@ export class AISessionService {
     async appendToContext<T> (runtime: AISessionRuntime, id: string, type: SessionEvent['type'], data: T, runId?: string): Promise<SessionEvent<T>> {
         const protectedData = this.protectStoredValue(data) as T
         const event = await this.store.append(id, type, protectedData, runId)
-        if (runtime.id === id) { runtime.events.next([...runtime.events.value, event]) }
+        if (runtime.id === id && event.seq) {
+            if (this.store.isDraft(id)) {
+                const events = await this.store.read(id)
+                if (runtime.id === id && this.store.isDraft(id)) { runtime.events.next(events) }
+            } else { runtime.events.next([...runtime.events.value, event]) }
+        }
         return event
+    }
+
+    deletionBlockReason (id: string): string {
+        if (this.loadingContexts.has(id)) { return '会话正在加载，请稍后重试' }
+        if (this.openingContexts.has(id) || [...this.openingTabs.values()].includes(id)) { return 'SSH 正在连接，请先关闭连接' }
+        for (const tab of this.pendingAttachments.keys()) {
+            if (tab.aiSessionId === id) { return 'SSH 正在连接，请先关闭连接' }
+        }
+        const runtime = this.find(id)
+        if (!!runtime?.activeRunId || runtime?.locked) { return '会话正在使用，请先停止 Agent 并断开 SSH' }
+        if (runtime && (runtime.terminal.value.state !== 'closed' || runtime.tab.session?.open || runtime.tab.sshSession?.open)) {
+            return '会话仍关联 SSH 连接，请先断开连接'
+        }
+        return ''
+    }
+
+    async deleteContext (id: string): Promise<void> {
+        const reason = this.deletionBlockReason(id)
+        if (reason) { throw new Error(reason) }
+        const runtime = this.find(id)
+        this.loadingContexts.add(id)
+        if (runtime) { runtime.locked = true }
+        try {
+            runtime?.flushOutput?.()
+            await this.store.deleteSession(id)
+        } finally {
+            if (runtime && this.store.isRetired(id) && this.sessions.get(runtime.tab) === runtime) {
+                runtime.id = await this.store.createDraft({
+                    profileId: runtime.tab.profile.id, profileName: runtime.tab.profile.name,
+                    host: runtime.tab.profile.options.host, user: runtime.tab.profile.options.user,
+                    port: runtime.tab.profile.options.port ?? 22,
+                })
+                runtime.tab.aiSessionId = runtime.id
+                runtime.events.next([])
+                runtime.historyToRestore = undefined
+                runtime.liveText.next('')
+                runtime.state.next('IDLE')
+            }
+            this.loadingContexts.delete(id)
+            if (runtime) { runtime.locked = false }
+        }
     }
 
     private protectStoredValue (value: unknown): unknown {
