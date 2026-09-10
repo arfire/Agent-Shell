@@ -27,6 +27,7 @@ async function main () {
     const test = async (name, run) => { await run(); total++; console.log('PASS', name) }
     await load('tabby-ai/src/session/session-store.spec.ts').runTests(test, load)
     await load('tabby-ai/src/llm/model-compatibility.spec.ts').runTests(test, load)
+    await load('tabby-ai/src/web/web.spec.ts').runTests(test, load)
     console.log(`${total} AI reliability checks passed`)
 }
 main().catch(error => { console.error(error); process.exitCode = 1 })

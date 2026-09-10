@@ -39,8 +39,6 @@
                 small {{entry.updatedAt | date:'MM-dd HH:mm'}}{{runtime?.id === entry.id ? ' · 当前' : ''}}{{!entry.hasUserInput ? ' · 空会话' : ''}}
             button.btn.btn-sm.btn-link((click)='startRename(entry)', aria-label='重命名会话', title='重命名会话')
                 i.fas.fa-pen
-            button.btn.btn-sm.btn-link((click)='inspect(entry)', aria-label='预览记录', title='预览记录')
-                i.fas.fa-eye
             button.btn.btn-sm.btn-link.text-danger((click)='confirmDelete(entry)', [disabled]='busy || !!sessions.deletionBlockReason(entry.id)', aria-label='删除会话', [title]='sessions.deletionBlockReason(entry.id) || "删除会话"')
                 i.fas.fa-trash
             .input-group.p-1(*ngIf='renameId === entry.id')
@@ -48,14 +46,10 @@
                 button.btn.btn-sm.btn-primary((click)='rename()') 保存
                 button.btn.btn-sm.btn-link((click)='renameId = ""') 取消
     p.p-2.text-muted(*ngIf='!groups.length') 暂无会话记录
-.preview(*ngIf='selected')
-    .d-flex.p-2
-        strong.me-auto 历史预览
-        button.btn.btn-sm.btn-primary((click)='open(selected!)', [disabled]='busy') 打开会话
-    .p-2(*ngIf='linking')
-        label.small 重新关联服务器（后续命令将在所选服务器执行）
-        select.form-control.form-control-sm([(ngModel)]='profileId', aria-label='关联服务器')
-            option(value='') 选择服务器
-            option(*ngFor='let profile of profiles', [value]='profile.id') {{profile.name}}
-        button.btn.btn-sm.btn-primary.mt-1((click)='associate()', [disabled]='!profileId || busy') 关联并打开
-    pre {{preview}}
+.association.p-2(*ngIf='linking && selected')
+    label.small 重新关联服务器（后续命令将在所选服务器执行）
+    select.form-control.form-control-sm([(ngModel)]='profileId', aria-label='关联服务器')
+        option(value='') 选择服务器
+        option(*ngFor='let profile of profiles', [value]='profile.id') {{profile.name}}
+    button.btn.btn-sm.btn-primary.mt-1((click)='associate()', [disabled]='!profileId || busy') 关联并打开
+    button.btn.btn-sm.btn-link.mt-1((click)='linking = false', [disabled]='busy') 取消

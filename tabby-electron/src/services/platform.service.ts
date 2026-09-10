@@ -428,9 +428,6 @@ class ElectronFileUpload extends FileUpload {
     async read (): Promise<Uint8Array> {
         const result = await this.file.read(this.buffer, 0, this.buffer.length, null)
         this.increaseProgress(result.bytesRead)
-        if (this.getCompletedBytes() >= this.getSize()) {
-            this.setCompleted(true)
-        }
         return this.buffer.slice(0, result.bytesRead)
     }
 

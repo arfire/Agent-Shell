@@ -18,13 +18,15 @@ export class HomeBaseService {
     ) {
         this.appVersion = platform.getAppVersion()
 
-        if (this.config.store.enableAnalytics && !this.config.store.enableWelcomeTab) {
-            this.enableAnalytics()
-        }
+        this.config.ready$.toPromise().then(() => {
+            if (this.config.store.enableAnalytics && !this.config.store.enableWelcomeTab) {
+                this.enableAnalytics()
+            }
+        })
     }
 
     openGitHub (): void {
-        this.platform.openExternal('https://github.com/Eugeny/tabby')
+        this.platform.openExternal('https://github.com/arfire/Agent-Shell')
     }
 
     openDiscord (): void {

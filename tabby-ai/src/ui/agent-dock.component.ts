@@ -1,5 +1,5 @@
 import { ChangeDetectorRef, Component, Input, NgZone, OnDestroy, OnInit } from '@angular/core'
-import { Subscription } from 'rxjs'
+import { from, Subscription } from 'rxjs'
 
 import { AISessionRuntime } from '../session/ai-session.service'
 import { AgentInteractionService, ApprovalRequest, FormRequest, InteractionOwner } from '../agent/interaction.service'
@@ -22,6 +22,7 @@ export class AgentDockComponent implements OnInit, OnDestroy {
     confirmed = new Set<string>()
     changingPermission = false
     showFailure = false
+    configReady = false
     private subscriptions: Subscription[] = []
 
     constructor (
@@ -35,6 +36,10 @@ export class AgentDockComponent implements OnInit, OnDestroy {
 
     ngOnInit (): void {
         this.subscriptions.push(
+            from(this.permissions.config.ready).subscribe(() => {
+                this.configReady = true
+                this.refresh()
+            }),
             this.permissions.config.changed.subscribe(() => this.refresh()),
             this.runtime.terminal.subscribe(() => this.refresh()),
             this.runtime.state.subscribe(() => this.refresh()),

@@ -6,6 +6,7 @@ export type SessionEventType =
     'ai-message' |
     'ai-command' |
     'command-result' |
+    'web-activity' |
     'approval' |
     'interaction' |
     'agent-state' |

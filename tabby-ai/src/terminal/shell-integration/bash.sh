@@ -1,5 +1,5 @@
 # Loaded into the current interactive shell; no files or exported secrets.
-if [[ $- != *i* || ${BASH_VERSINFO[0]} -lt 5 || ( ${BASH_VERSINFO[0]} -eq 5 && ${BASH_VERSINFO[1]} -lt 1 ) ]]; then return 1; fi
+if [[ $- != *i* || ${BASH_VERSINFO[0]} -lt 5 ]]; then return 1; fi
 if declare -F __ash_uninstall >/dev/null; then __ash_uninstall; fi
 __ash_saved_ps1=$PS1
 __ash_saved_ps0=${PS0-}

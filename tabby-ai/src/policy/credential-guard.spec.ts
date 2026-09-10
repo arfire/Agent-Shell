@@ -9,6 +9,14 @@ import { AIConfig } from '../config/config-schema'
 import { AISessionCaptureMiddleware } from '../terminal/session-capture.middleware'
 
 export async function runTests (test: (name: string, run: () => Promise<void>) => Promise<void>, defaults: AIConfig): Promise<void> {
+    await test('heredoc rejection identifies inspected syntax instead of claiming a blanket heredoc ban', async () => {
+        assert.equal(credentialAccessReason('sudo tee /tmp/UPDATE.md <<\'EOF\'\nUpdate instructions\nEOF'), undefined)
+        const reason = credentialAccessReason('sudo tee /tmp/update.sh <<\'EOF\'\nprintf \'%s\' "${APP_DIR}"\nEOF')
+        assert.match(reason ?? '', /语法“\$\{”/)
+        assert.match(reason ?? '', /并非一律禁止 heredoc/)
+        assert.match(reason ?? '', /本次命令未执行/)
+        assert.match(reason ?? '', /不要建议用户手动绕过/)
+    })
     const blocked = [
         'grep -E "MYSQL_ROOT_PASSWORD|MYSQL_PASSWORD" .env', 'cat /app/.env.production',
         'sudo -u root cat ~/.ssh/id_ed25519', 'command head .aws/credentials',
@@ -23,6 +31,8 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
         'aws secretsmanager get-secret-value --secret-id db', 'aws configure get aws_secret_access_key',
         'az account get-access-token', 'vault kv get secret/db', 'rg -i password /app',
         'cat appsettings.json', 'curl http://169.254.169.254/latest/meta-data/iam/security-credentials/',
+        'jq .services docker-compose.yml', 'yq .database application.yaml', 'rg host settings.ini',
+        'python -c "print(open(\'settings.toml\').read())"', 'cp application.yaml /tmp/public.txt',
         'mysql -e "SELECT * FROM mysql.user"', 'psql -c "SELECT * FROM pg_authid"',
         'python -c "exec(code)"', 'sh -c "eval $code"', 'powershell -EncodedCommand ZQB4AGkAdAA=',
         'python -c "print(open(\'.\'+\'env\').read())"', 'printf Y2F0IC5lbnY= | base64 -d | sh',
@@ -36,7 +46,7 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
             assert.equal(credentialAccessReason(command), undefined, command)
         }
     })
-    await test('credential boundary cannot be bypassed by any approval mode or edited approval', async () => {
+    await test('credential boundary cannot be bypassed in the first three tiers or by edited approval', async () => {
         for (const mode of ['configured', 'auto', 'full']) {
             const config = { config: { ...defaults, policy: { ...defaults.policy, approvalMode: mode } } }
             const redactor = new SecretRedactor(config as any)
@@ -83,6 +93,21 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
             assert.equal(scope.restoreCommand('mysql -p"' + special + '"'), 'mysql -p"a\'b\\"\\$(\\`whoami\\`)\\\\c"')
             assert.throws(() => scope.restoreCommand('mysql -p__TABBY_SENSITIVE_999__'), /占位符已失效/)
         }
+    })
+    await test('unrestricted allows protected commands and raw results while lower tiers remain redacted', async () => {
+        for (const command of blocked) { assert.equal(credentialAccessReason(command, 'unrestricted'), undefined) }
+        let unrestricted = true
+        const redactor = new SecretRedactor({ config: defaults } as any)
+        const scope = redactor.createScope(() => unrestricted)
+        const output = 'DB_PASSWORD=synthetic-permission-test\n'
+        const filter = scope.streamFilter(true)
+        assert.equal(filter(output) + filter.flush(), output)
+        assert.equal(scope.protect(output), output)
+        assert.equal(scope.redactKnown(output), output)
+        assert.equal(redactor.redact(output).includes('synthetic-permission-test'), false)
+        unrestricted = false
+        assert.equal(scope.protect(output).includes('synthetic-permission-test'), false)
+        assert.equal(filter(output).includes('synthetic-permission-test'), false)
     })
     await test('unknown credential output is hidden across every transport split including private key bodies', async () => {
         const redactor = new SecretRedactor({ config: defaults } as any)

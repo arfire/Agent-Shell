@@ -1,5 +1,23 @@
 version: 1
 
+web:
+  mode: off
+  baseURL: ""
+  authorization: ""
+  engines: []
+  language: auto
+  timeoutMs: 15000
+  maxResults: 5
+  maxCallsPerRun: 8
+  maxPageChars: 12000
+  useDefaultModel: true
+  model:
+    baseURL: ""
+    apiKey: ""
+    model: ""
+    temperature: 0.2
+    timeout: 60000
+
 llm:
   baseURL: "https://api.openai.com/v1"
   apiKey: ""

@@ -305,6 +305,7 @@ class ZModemMiddleware extends SessionMiddleware {
             if (canceled) {
                 this.showMessage(colors.bgRed.black(' Canceled ') + ' ' + offer.name)
             } else {
+                transfer.setCompleted(true)
                 this.showMessage(colors.bgGreen.black(' Sent ') + ' ' + offer.name)
             }
 

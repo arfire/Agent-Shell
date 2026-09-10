@@ -17,7 +17,7 @@ function redactCredentials (content: string): string {
     const plain = content.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
     const result = plain
         .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, '[REDACTED_PRIVATE_KEY]')
-        .replace(/(["']?([\w.-]+)["']?\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s,}\r\n]+)/g, (match, prefix: string, key: string, value: string) => {
+        .replace(/(["']?([\w.-]*(?:password|passwd|token|secret|api[_-]?key|access[_-]?key|private[_-]?key|connection[_-]?string|database_url|mysql_pwd|pgpassword)[\w.-]*)["']?\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s,}\r\n]+)/gi, (match, prefix: string, key: string, value: string) => {
             if (!SECRET_FIELD.test(key) || /__TABBY_SENSITIVE_\d+__|\[REDACTED/.test(value)) { return match }
             if (/^password$/i.test(key) && /^(?:YES|NO)\)?$/i.test(value) && /using password:/i.test(content)) { return match }
             return prefix + '[REDACTED]'
@@ -33,10 +33,11 @@ function redactCredentials (content: string): string {
 export class SecretRedactionScope {
     private values = new Map<string, string>()
 
-    constructor (private redactor: SecretRedactor) { }
+    constructor (private redactor: SecretRedactor, private allowSensitiveContent: () => boolean = () => false) { }
 
     protect (content: string): string {
         let result = this.replaceKnown(content)
+        if (this.allowSensitiveContent()) { return result }
         for (const pattern of DISCOVERABLE_SENSITIVE_VALUES) {
             result = result.replace(pattern, value => this.register(value))
         }
@@ -44,7 +45,8 @@ export class SecretRedactionScope {
     }
 
     redactKnown (content: string): string {
-        return this.redactor.redact(this.replaceKnown(content))
+        const result = this.replaceKnown(content)
+        return this.allowSensitiveContent() ? result : this.redactor.redact(result)
     }
 
     /** Keep a possible secret prefix until the next transport chunk arrives. */
@@ -53,6 +55,7 @@ export class SecretRedactionScope {
         let privateKey = false
         let secretQuote = ''
         const redact = (text: string): string => {
+            if (this.allowSensitiveContent()) { return this.replaceKnown(text) }
             if (!bufferLines) { return this.redactKnown(text) }
             let visible = ''
             for (const line of text.match(/[^\n]*\n|[^\n]+$/g) ?? []) {
@@ -167,6 +170,11 @@ export class SecretRedactor {
 
     redact (content: string): string {
         const config = this.configService.config.redaction
+        const web = this.configService.config.web
+        for (const secret of [this.configService.config.llm.apiKey, web?.model.apiKey, web?.authorization,
+            web?.authorization.replace(/^(?:Bearer|Basic)\s+/i, '')]) {
+            if (secret) { content = content.split(secret).join('[REDACTED]') }
+        }
         let result = redactCredentials(content)
         if (!config.enabled) {
             return result
@@ -183,7 +191,7 @@ export class SecretRedactor {
         return result
     }
 
-    createScope (): SecretRedactionScope {
-        return new SecretRedactionScope(this)
+    createScope (allowSensitiveContent: () => boolean = () => false): SecretRedactionScope {
+        return new SecretRedactionScope(this, allowSensitiveContent)
     }
 }

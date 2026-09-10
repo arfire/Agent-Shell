@@ -144,6 +144,8 @@ export class AgentTerminalPresenter {
         } else if (event.type === 'ai-command') {
             presentation.pending += '\r\n\x1b[2m' + terminalText(String(data.reason ?? '')) + '\x1b[0m\r\n' +
                 '$ ' + terminalText(String(data.command ?? '')) + '\r\n'
+        } else if (event.type === 'web-activity') {
+            presentation.pending += '\r\n\x1b[2m' + terminalText(String(data.content ?? '')) + '\x1b[0m\r\n'
         } else if (event.type === 'error') {
             presentation.pending += '\r\n\x1b[31mAgent: ' + terminalText(String(data.message ?? '')) + '\x1b[0m\r\n'
         }

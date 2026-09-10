@@ -155,7 +155,7 @@ async function main () {
     const { CommandPolicyService } = load('tabby-ai/src/policy/command-policy.service.ts')
     const { AgentService } = load('tabby-ai/src/agent/agent.service.ts')
     await test('permission tiers execute, request approval and deny consistently through Agent tools', async () => {
-        for (const [mode, expected] of Object.entries({ configured: ['execute', 'ask', 'ask', 'deny'], auto: ['execute', 'ask', 'ask', 'deny'], full: ['ask', 'ask', 'ask', 'deny'] })) {
+        for (const [mode, expected] of Object.entries({ configured: ['execute', 'ask', 'ask', 'deny'], auto: ['execute', 'execute', 'ask', 'deny'], full: ['execute', 'execute', 'execute', 'deny'], unrestricted: ['execute', 'execute', 'execute', 'execute'] })) {
             for (const [index, risk] of ['SAFE', 'MODIFY', 'DANGEROUS', 'DENY'].entries()) {
                 const config = { config: { ...defaults, policy: { ...defaults.policy, approvalMode: mode, autoApprove: [], requireApproval: [], requireSecondApproval: [], deny: [], commandRules: [{ command: 'pwd', risk }] } } }
                 const events = [], approvals = [], executions = []
@@ -192,17 +192,18 @@ async function main () {
         assert.notEqual(policy.evaluate('git status-other', 'bash', snapshot.policy).risk, 'SAFE')
         assert.equal(policy.evaluate('git status; sh -c "echo test"', 'bash', snapshot.policy).risk, 'DANGEROUS')
     })
-    await test('full access reminder honors cancellation and remembers explicit acceptance', async () => {
+    await test('only unrestricted mode asks once for explicit acknowledgement', async () => {
         const previous = global.window
         global.window = { localStorage: {} }
         try {
             let calls = 0
             const permissions = new AgentPermissionsService({ config: defaults }, { showMessageBox: async () => ({ response: calls++ ? 1 : 0 }) })
             assert.equal(await permissions.confirmMode('auto'), true)
-            assert.equal(await permissions.confirmMode('full'), false)
-            assert.equal(global.window.localStorage.ashFullAccessAcknowledged, undefined)
             assert.equal(await permissions.confirmMode('full'), true)
-            assert.equal(await permissions.confirmMode('full'), true)
+            assert.equal(await permissions.confirmMode('unrestricted'), false)
+            assert.equal(global.window.localStorage.ashUnrestrictedAccessAcknowledged, undefined)
+            assert.equal(await permissions.confirmMode('unrestricted'), true)
+            assert.equal(await permissions.confirmMode('unrestricted'), true)
             assert.equal(calls, 2)
         } finally { global.window = previous }
     })

@@ -56,13 +56,20 @@ export class TerminalControllerService {
         session.middleware.unshift(input)
         session.middleware.unshift(framing)
         session.middleware.unshift(integration)
-        const update = (): void => runtime.terminal.next({
-            mode: integration.mode.value,
-            ready: input.canCapture,
-            notice: integration.notice.value,
-            state: integration.state.value,
-            failureReason: integration.failureReason.value,
-        })
+        const update = (): void => {
+            const next = {
+                mode: integration.mode.value,
+                ready: input.canCapture,
+                notice: integration.notice.value,
+                state: integration.state.value,
+                failureReason: integration.failureReason.value,
+            }
+            const previous = runtime.terminal.value
+            if (previous.mode !== next.mode || previous.ready !== next.ready || previous.notice !== next.notice ||
+                previous.state !== next.state || previous.failureReason !== next.failureReason) {
+                runtime.terminal.next(next)
+            }
+        }
         const pasteListener = (event: ClipboardEvent): void => {
             if (input.pasteText(event.clipboardData?.getData('text/plain') ?? '')) {
                 event.preventDefault()
@@ -234,7 +241,7 @@ export class TerminalControllerService {
     async execute (
         runtime: AISessionRuntime, command: string,
         onPrompt?: (prompt: string, kind: InteractivePromptKind) => Promise<string|null>,
-        signal?: AbortSignal, outputFilter?: (content: string) => string,
+        signal?: AbortSignal, outputFilter?: (content: string) => string, beforeExecute?: () => void,
     ): Promise<CommandExecutionResult> {
         const attachment = this.attachments.get(runtime.tab)
         if (!attachment) { throw new Error('AI terminal middleware is not attached') }
@@ -242,6 +249,7 @@ export class TerminalControllerService {
         await attachment.integration.redraw()
         if (signal?.aborted) { throw signal.reason }
         await runtime.tab.write('\r\n')
+        beforeExecute?.()
         attachment.integration.commandStarted()
         return attachment.framing.execute(command, attachment.input, onPrompt, signal, outputFilter, attachment.integration.kind ?? 'bash')
     }

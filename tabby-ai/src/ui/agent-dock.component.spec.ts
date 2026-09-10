@@ -5,20 +5,33 @@ import { AgentInteractionService } from '../agent/interaction.service'
 import { AISessionService } from '../session/ai-session.service'
 
 export async function runTests (test: (name: string, run: () => Promise<void>) => Promise<void>): Promise<void> {
-    const fixture = (interactions: AgentInteractionService, connectionId: string) => {
+    const fixture = (interactions: AgentInteractionService, connectionId: string, ready = Promise.resolve()) => {
         const runtime: any = {
             id: 'shared-transcript', connectionId, activeRunId: 'run-' + connectionId,
             state: new BehaviorSubject('WAITING_APPROVAL'),
             terminal: new BehaviorSubject({ state: 'prompt' }),
             tab: { profile: { name: connectionId, options: { user: 'tester', host: connectionId + '.example', port: 2222 } }, frontend: { focus: () => undefined } },
         }
-        const dock = new AgentDockComponent({} as any, { config: { changed: new Subject() } } as any,
+        const dock = new AgentDockComponent({} as any, { config: { ready, changed: new Subject() } } as any,
             {} as any, interactions, { markForCheck: () => undefined } as any, { run: (fn: () => void) => fn() } as any)
         dock.runtime = runtime
         dock.ngOnInit()
         const owner = { sessionId: runtime.id, connectionId, runId: runtime.activeRunId }
         return { dock, runtime, owner }
     }
+    await test('permission controls wait for configuration and ignore readiness after the dock closes', async () => {
+        let loaded = (): void => undefined
+        const ready = new Promise<void>(resolve => { loaded = resolve })
+        const service = new AgentInteractionService()
+        const a = fixture(service, 'open', ready), b = fixture(service, 'closed', ready)
+        assert.equal(a.dock.configReady, false)
+        b.dock.ngOnDestroy()
+        loaded()
+        await ready
+        assert.equal(a.dock.configReady, true)
+        assert.equal(b.dock.configReady, false)
+        a.dock.ngOnDestroy()
+    })
     await test('two SSH docks with the same transcript only show and approve their own requests', async () => {
         const service = new AgentInteractionService()
         const a = fixture(service, 'connection-a'), b = fixture(service, 'connection-b')

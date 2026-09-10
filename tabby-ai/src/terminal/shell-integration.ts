@@ -126,7 +126,7 @@ export class ShellIntegration extends SessionMiddleware {
         this.promptPending = false
         clearTimeout(this.promptTimer)
         this.generation++
-        this.state.next('remote')
+        if (this.state.value !== 'remote') { this.state.next('remote') }
     }
 
     setAlternateScreen (active: boolean): void {

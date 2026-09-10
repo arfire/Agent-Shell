@@ -19,6 +19,8 @@ export function * historyChunks (events: SessionEvent[]): Generator<string> {
             yield '\r\n$ ' + terminalText(String(data.content ?? '')) + '\r\n'
         } else if (event.type === 'command-result') {
             yield '\r\n\x1b[2m退出状态：' + terminalText(String(data.exitCode ?? '未知')) + '\x1b[0m\r\n'
+        } else if (event.type === 'web-activity') {
+            yield '\r\n联网: ' + terminalText(String(data.content ?? '')) + '\r\n'
         } else if (event.type === 'error') {
             yield '\r\nAgent: ' + terminalText(String(data.message ?? '')) + '\r\n'
         }

@@ -240,26 +240,57 @@ export class SFTPPanelComponent {
 
     async uploadOneFolder (transfer: DirectoryUpload, accumPath = ''): Promise<void> {
         const savedPath = this.path
-        for(const t of transfer.getChildrens()) {
-            if (t instanceof DirectoryUpload) {
-                try {
-                    await this.sftp.mkdir(path.posix.join(this.path, accumPath, t.getName()))
-                } catch {
-                    // Intentionally ignoring errors from making duplicate dirs.
-                }
-                await this.uploadOneFolder(t, path.posix.join(accumPath, t.getName()))
-            } else {
-                await this.sftp.upload(path.posix.join(this.path, accumPath, t.getName()), t)
-            }
+        try {
+            await this.uploadFolderRecursive(transfer, path.join(savedPath, accumPath))
+        } catch (error) {
+            this.cancelPendingUploads(transfer)
+            this.notifications.error(`Upload failed: ${savedPath}: ${error.message ?? error}`)
+            return
         }
         if (this.path === savedPath) {
-            await this.navigate(this.path)
+            await this.navigate(savedPath)
+        }
+    }
+
+    private async uploadFolderRecursive (transfer: DirectoryUpload, destination: string): Promise<void> {
+        for (const t of transfer.getChildrens()) {
+            const target = path.join(destination, t.getName())
+            if (t instanceof DirectoryUpload) {
+                try {
+                    await this.sftp.mkdir(target)
+                } catch (error) {
+                    const existing = await this.sftp.stat(target).catch(() => null)
+                    if (!existing?.isDirectory) {
+                        throw new Error(`${target}: ${error.message ?? error}`)
+                    }
+                }
+                await this.uploadFolderRecursive(t, target)
+            } else {
+                await this.sftp.upload(target, t)
+            }
+        }
+    }
+
+    private cancelPendingUploads (transfer: DirectoryUpload): void {
+        for (const child of transfer.getChildrens()) {
+            if (child instanceof DirectoryUpload) {
+                this.cancelPendingUploads(child)
+            } else if (!child.isComplete() && !child.isCancelled()) {
+                child.setStatus('Upload stopped because a folder upload failed')
+                child.cancel()
+            }
         }
     }
 
     async uploadOne (transfer: FileUpload): Promise<void> {
         const savedPath = this.path
-        await this.sftp.upload(path.join(this.path, transfer.getName()), transfer)
+        const destination = path.join(savedPath, transfer.getName())
+        try {
+            await this.sftp.upload(destination, transfer)
+        } catch (error) {
+            this.notifications.error(`Upload failed: ${destination}: ${error.message ?? error}`)
+            return
+        }
         if (this.path === savedPath) {
             await this.navigate(this.path)
         }

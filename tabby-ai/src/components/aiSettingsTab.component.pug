@@ -81,6 +81,80 @@ ng-container(*ngIf='model')
                 strong {{check.label}}
                 span {{check.state === 'pending' ? '等待检查' : check.state === 'running' ? '检查中…' : check.message}}
         .alert.mt-2(*ngIf='connectionResult', [class.alert-success]='connectionResult.success', [class.alert-danger]='!connectionResult.success') {{ connectionResult.message }}
+    .settings-section(*ngIf='section === "web"')
+        .form-line
+            .header
+                .title 联网模式
+            select.form-select([(ngModel)]='web.mode', (ngModelChange)='markWebChanged()', aria-label='联网模式')
+                option(value='off') 关闭
+                option(value='auto') 按需自动搜索
+                option(value='manual') 仅明确要求时搜索
+        p.setting-help “仅明确要求”时，请在问题中写明“联网搜索”“查文档”，或提供网页链接。请求从本地 Ash 发出。
+        .form-line
+            .header
+                .title SearXNG 服务地址
+            input.form-control(type='url', [(ngModel)]='web.baseURL', (ngModelChange)='markWebChanged()', placeholder='https://search.example.com', aria-label='SearXNG 服务地址')
+        p.setting-help 填写服务根地址，支持自建内网地址和子路径，不需要填写 /search。服务端需要启用 JSON 格式。
+        .form-line
+            .header
+                .title 认证信息（可选）
+            input.form-control(type='password', [(ngModel)]='web.authorization', (ngModelChange)='markWebChanged()', placeholder='Bearer … 或 Basic …', autocomplete='off', aria-label='搜索服务认证信息')
+        p.setting-help 仅用于反向代理的 Authorization 请求头，与模型密钥一样保存在本地配置文件中，不会发给网页或模型。
+        button.btn.btn-outline-secondary(type='button', (click)='testWeb()', [disabled]='webTesting || !web.baseURL') 测试搜索连接
+        hr
+        label.toggle-row
+            input(type='checkbox', [(ngModel)]='web.useDefaultModel', (ngModelChange)='markWebChanged()')
+            span 使用默认模型
+        p.setting-help(*ngIf='web.useDefaultModel') 跟随“模型连接”配置，由主 Agent 直接搜索并阅读资料。
+        ng-container(*ngIf='!web.useDefaultModel')
+            p.setting-help 独立模型负责检索和整理网页资料，主 Agent 继续使用默认模型分析服务器和执行命令。
+            .form-line
+                .header
+                    .title API Base URL
+                input.form-control(type='url', [(ngModel)]='web.model.baseURL', (ngModelChange)='markWebChanged()', placeholder='https://api.example.com/v1', aria-label='联网模型 API Base URL')
+            .form-line
+                .header
+                    .title API Key
+                input.form-control(type='password', [(ngModel)]='web.model.apiKey', (ngModelChange)='markWebChanged()', autocomplete='off', aria-label='联网模型 API Key')
+            .form-line
+                .header
+                    .title 模型名称
+                input.form-control(type='text', [(ngModel)]='web.model.model', (ngModelChange)='markWebChanged()', aria-label='联网模型名称')
+            .form-line
+                .header
+                    .title 模型超时（毫秒）
+                input.form-control(type='number', min='1000', max='300000', step='1000', [(ngModel)]='web.model.timeout', (ngModelChange)='markWebChanged()', aria-label='联网模型超时')
+            button.btn.btn-outline-secondary(type='button', (click)='testWeb(true)', [disabled]='webTesting || !web.model.baseURL || !web.model.model') 测试联网模型
+            p.setting-help 测试会调用当前填写的模型，可能消耗模型额度。失败时不会自动切换到默认模型。
+        button.btn.btn-link(type='button', *ngIf='webTesting', (click)='cancelWebCheck()') 取消检查
+        .alert.mt-2(*ngIf='webResult', [class.alert-success]='webResult.success', [class.alert-danger]='!webResult.success', role='status') {{ webResult.message }}
+        details.mt-3
+            summary 高级设置
+            .form-line
+                .header
+                    .title 搜索语言
+                input.form-control(type='text', [(ngModel)]='web.language', (ngModelChange)='markWebChanged()', placeholder='auto / zh-CN / en', aria-label='搜索语言')
+            p.setting-help 填写 auto 或留空时使用 SearXNG 服务端默认语言；指定语言时填写服务支持的语言代码，如 zh-CN 或 en。
+            .form-line
+                .header
+                    .title 搜索引擎
+                input.form-control(type='text', [ngModel]='web.engines.join(", ")', (ngModelChange)='setWebEngines($event)', placeholder='留空使用服务端配置', aria-label='搜索引擎')
+            .form-line
+                .header
+                    .title 网络超时（毫秒）
+                input.form-control(type='number', min='1000', max='120000', step='1000', [(ngModel)]='web.timeoutMs', (ngModelChange)='markWebChanged()', aria-label='网络超时')
+            .form-line
+                .header
+                    .title 每次搜索结果数
+                input.form-control(type='number', min='1', max='10', [(ngModel)]='web.maxResults', (ngModelChange)='markWebChanged()', aria-label='搜索结果数')
+            .form-line
+                .header
+                    .title 每轮联网调用上限
+                input.form-control(type='number', min='1', max='20', [(ngModel)]='web.maxCallsPerRun', (ngModelChange)='markWebChanged()', aria-label='联网调用上限')
+            .form-line
+                .header
+                    .title 单页正文字符上限
+                input.form-control(type='number', min='1000', max='30000', step='1000', [(ngModel)]='web.maxPageChars', (ngModelChange)='markWebChanged()', aria-label='正文字符上限')
     .settings-section(*ngIf='section === "input"')
         p.text-muted Agent 模式下，这些命令会优先识别为 Shell。每行一个命令名，多行命令仍按完整输入识别。
         label(for='ai-shell-commands') Shell 命令列表
@@ -98,7 +172,7 @@ ng-container(*ngIf='model')
         select#ai-approval-mode.form-select([(ngModel)]='model.policy.approvalMode')
             option(*ngFor='let mode of permissions.modes', [value]='mode.value') {{ mode.label }}
         ng-container(*ngFor='let mode of permissions.modes')
-            p.setting-help(*ngIf='model.policy.approvalMode === mode.value', [class.text-warning]='mode.value === "full"') {{ mode.description }}
+            p.setting-help(*ngIf='model.policy.approvalMode === mode.value', [class.text-warning]='mode.value === "full" || mode.value === "unrestricted"') {{ mode.description }}
         .form-line
             .header
                 .title 未匹配命令的风险

@@ -16,6 +16,7 @@ export class SSHShellSession extends BaseSession {
     private serviceMessage = new Subject<string>()
     private ssh: SSHSession|null
     private closing = false
+    private writeQueue = Promise.resolve()
 
     constructor (
         injector: Injector,
@@ -85,9 +86,16 @@ export class SSHShellSession extends BaseSession {
     }
 
     write (data: Buffer): void {
-        if (this.shell) {
-            this.shell.write(new Uint8Array(data))
-        }
+        const shell = this.shell
+        if (!shell || this.closing) { return }
+        const chunk = new Uint8Array(data)
+        // Native channel writes are asynchronous and must enter the channel in order.
+        this.writeQueue = this.writeQueue.then(async () => {
+            if (!this.closing) { await shell.write(chunk) }
+        }).catch(error => {
+            this.emitServiceMessage(`SSH write failed: ${error}`)
+            void this.destroy()
+        })
     }
 
     kill (_signal?: string): void {

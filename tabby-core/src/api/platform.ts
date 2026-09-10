@@ -42,7 +42,7 @@ export abstract class FileTransfer {
     }
 
     isComplete (): boolean {
-        return this.completed || this.completedBytes >= this.getSize()
+        return !this.cancelled && (this.completed || this.completedBytes >= this.getSize())
     }
 
     isCancelled (): boolean {
@@ -80,7 +80,7 @@ export abstract class FileTransfer {
     private lastChunkStartTime = Date.now()
     private lastChunkSpeed = 0
     private cancelled = false
-    private completed = false
+    protected completed = false
     private status = ''
 }
 
@@ -94,6 +94,11 @@ export abstract class DirectoryDownload extends FileTransfer {
 }
 
 export abstract class FileUpload extends FileTransfer {
+    // Reading the source is only progress; the destination confirms completion.
+    isComplete (): boolean {
+        return this.completed && !this.isCancelled()
+    }
+
     abstract getMode (): number
 
     abstract read (): Promise<Uint8Array>
@@ -109,6 +114,7 @@ export abstract class FileUpload extends FileTransfer {
             result.set(buf, pos)
             pos += buf.length
         }
+        this.setCompleted(true)
         return result
     }
 }

@@ -13,8 +13,9 @@ import { AgentTerminalPresenter } from '../terminal/agent-terminal-presenter'
 import { AgentContextBuilder } from './context-builder'
 import { AgentInteractionService } from './interaction.service'
 import { AgentRunQueue } from './run-queue'
-import { AgentPermissionsService, approvalAction, CommandAuthorization } from '../policy/agent-permissions.service'
+import { AgentPermissionsService, approvalAction, CommandAuthorization, permissionInstructions } from '../policy/agent-permissions.service'
 import { credentialAccessReason } from '../policy/credential-guard'
+import { WebService, WebRunState } from '../web/web.service'
 
 const TERMINAL_TOOLS: ChatTool[] = [{
     type: 'function',
@@ -55,6 +56,9 @@ interface ActiveRun {
     goal: string
     sensitive: SecretRedactionScope
     session: AISessionRuntime['tab']['session']
+    web?: WebRunState
+    containsSensitiveContext?: boolean
+    executingAuthorization?: CommandAuthorization
 }
 
 class UserRejectedError extends Error { }
@@ -84,6 +88,7 @@ export class AgentService {
         private terminal: TerminalControllerService,
         private presenter: AgentTerminalPresenter,
         private permissions: AgentPermissionsService,
+        private web?: WebService,
     ) { }
 
     async start (runtime: AISessionRuntime, input: string, inputMiddleware: AIInputMiddleware): Promise<void> {
@@ -95,7 +100,11 @@ export class AgentService {
             controller: new AbortController(),
             stopRequested: false,
             goal: input,
-            sensitive: this.redactor.createScope(),
+            sensitive: this.redactor.createScope(() => {
+                const unrestricted = this.permissions.mode(runtime) === 'unrestricted'
+                if (unrestricted) { run.containsSensitiveContext = true }
+                return unrestricted
+            }),
             session: runtime.tab.session,
         }
         let complete = (): void => { /* Set by the Promise executor below. */ }
@@ -180,20 +189,29 @@ export class AgentService {
     }
 
     private async runLoop (runtime: AISessionRuntime, run: ActiveRun, input: string): Promise<void> {
-        const messages = this.context.build(
+        const webTools = this.web?.tools(input) ?? []
+        run.web = { input, calls: 0, remainingChars: Math.min(32000, this.config.config.agent.maxContextTokens) }
+        let messages = this.context.build(
             runtime,
             input,
-            this.config.config.agent.maxContextTokens,
+            Math.floor(this.config.config.agent.maxContextTokens * (webTools.length ? 0.75 : 1)),
             content => run.sensitive.protect(content),
         )
         for (let step = 0; step < 50; step++) {
             if (run.stopRequested) {
                 throw new DOMException('Agent stopped', 'AbortError')
             }
+            const mode = this.permissions.mode(runtime)
+            if (run.containsSensitiveContext && mode !== 'unrestricted') {
+                // Rebuild from redacted history; do not resend raw fourth-tier results.
+                messages = this.context.build(runtime, this.redactor.redact(input), this.config.config.agent.maxContextTokens)
+                run.containsSensitiveContext = false
+            }
+            const permissionMessage = { role: 'system' as const, content: permissionInstructions(mode) }
             runtime.state.next('THINKING')
             runtime.liveText.next('')
             const textFilter = run.sensitive.streamFilter()
-            const result = await this.client.stream(messages, TERMINAL_TOOLS, {
+            const result = await this.client.stream([permissionMessage, ...messages], [...TERMINAL_TOOLS, ...this.web?.tools(input) ?? []], {
                 onText: text => runtime.liveText.next(runtime.liveText.value + textFilter(text)),
             }, run.controller.signal)
             runtime.liveText.next(runtime.liveText.value + textFilter.flush())
@@ -214,7 +232,8 @@ export class AgentService {
                 messages.push({
                     role: 'tool',
                     tool_call_id: toolCall.id,
-                    content: run.sensitive.redactKnown(toolResult),
+                    // WebService already redacts each value before serializing its JSON.
+                    content: ['web_search', 'web_fetch'].includes(toolCall.function.name) ? toolResult : run.sensitive.redactKnown(toolResult),
                 })
             }
         }
@@ -223,6 +242,13 @@ export class AgentService {
 
     private async executeTool (runtime: AISessionRuntime, run: ActiveRun, toolCall: ToolCall): Promise<string> {
         if (this.isStopped(run)) { throw new DOMException('Agent stopped', 'AbortError') }
+        if (['web_search', 'web_fetch'].includes(toolCall.function.name)) {
+            if (!this.web || !run.web) { return JSON.stringify({ error: '联网搜索未启用' }) }
+            return this.web.execute(toolCall, run.web, run.controller.signal, content => run.sensitive.protect(content), async event => {
+                if (this.isStopped(run)) { throw new DOMException('Agent stopped', 'AbortError') }
+                await this.sessions.append(runtime, 'web-activity', event, run.id)
+            })
+        }
         if (toolCall.function.name === 'request_user_input') {
             return this.requestUserInput(runtime, run, toolCall)
         }
@@ -238,7 +264,7 @@ export class AgentService {
         if (typeof argumentsValue.command !== 'string' || typeof argumentsValue.reason !== 'string') {
             return JSON.stringify({ error: 'terminal_exec requires string command and reason fields' })
         }
-        const credentialError = credentialAccessReason(argumentsValue.command)
+        const credentialError = credentialAccessReason(argumentsValue.command, this.permissions.mode(runtime))
         if (credentialError) {
             await this.sessions.append(runtime, 'error', { message: credentialError, source: 'credential-guard' }, run.id)
             return JSON.stringify({ error: credentialError })
@@ -267,7 +293,7 @@ export class AgentService {
                 confirmationsRequired: decision.risk === 'DANGEROUS' ? 2 : 1,
             })
             if (response.approved) {
-                const editedError = credentialAccessReason(response.command)
+                const editedError = credentialAccessReason(response.command, this.permissions.mode(runtime))
                 if (editedError) { return JSON.stringify({ error: editedError }) }
             }
             const protectedEditedCommand = run.sensitive.protect(response.command.trim())
@@ -319,7 +345,7 @@ export class AgentService {
             confirmationsRequired: decision.risk === 'DANGEROUS' ? 2 : 1,
         })
         if (response.approved) {
-            const editedError = credentialAccessReason(response.command)
+            const editedError = credentialAccessReason(response.command, this.permissions.mode(runtime))
             if (editedError) { return JSON.stringify({ error: editedError }) }
         }
         const protectedEditedCommand = run.sensitive.protect(response.command.trim())
@@ -351,9 +377,11 @@ export class AgentService {
         authorization: CommandAuthorization,
         approvedCommand?: string,
     ): Promise<string> {
-        // Recheck after approval edits, even in full access mode. Do not inspect
-        // restored values: only locally supplied placeholders may carry secrets.
-        const credentialError = credentialAccessReason(command)
+        const mode = this.permissions.mode(runtime)
+        if (mode !== authorization.mode) {
+            return JSON.stringify({ error: '执行权限已变化，请按当前权限重新提交命令' })
+        }
+        const credentialError = credentialAccessReason(command, mode)
         if (credentialError) { return JSON.stringify({ error: credentialError }) }
         if (this.isStopped(run) || runtime.tab.session !== run.session) {
             throw new DOMException('Agent stopped before command execution', 'AbortError')
@@ -361,7 +389,7 @@ export class AgentService {
         const rechecked = this.policy.evaluate(command, runtime.shellKind, authorization.policy)
         const current = this.policy.evaluate(command, runtime.shellKind)
         if (isHigherRisk(rechecked, decision)) { decision = rechecked }
-        if (isHigherRisk(current, decision)) {
+        if (mode !== 'unrestricted' && isHigherRisk(current, decision)) {
             return JSON.stringify({ error: '执行规则已收紧，请重新提交命令审批' })
         }
         const action = approvalAction(decision.risk, authorization.mode)
@@ -375,13 +403,16 @@ export class AgentService {
         await this.sessions.append(runtime, 'ssh-input', { content: command, source: 'ai', reason }, run.id)
         await this.presenter.interrupt(run.id)
         try {
+            run.executingAuthorization = authorization
             let executableCommand = ''
             try { executableCommand = run.sensitive.restoreCommand(command, runtime.shellKind) } catch (error) {
                 return JSON.stringify({ error: getErrorMessage(error) })
             }
             const result = await this.terminal.execute(runtime, executableCommand, (prompt, kind) =>
                 this.handleInteractivePrompt(runtime, run, prompt, kind), run.controller.signal,
-            run.sensitive.streamFilter(true))
+            run.sensitive.streamFilter(true), () => {
+                if (this.permissions.mode(runtime) !== mode) { throw new Error('执行权限已变化，命令未执行') }
+            })
             await this.sessions.append(runtime, 'command-result', { exitCode: result.exitCode, handedOff: run.stopRequested }, run.id)
             runtime.state.next('OBSERVING')
             if (run.stopRequested) {
@@ -389,6 +420,7 @@ export class AgentService {
             }
             return JSON.stringify({ exitCode: result.exitCode, output: result.output })
         } finally {
+            run.executingAuthorization = undefined
             if (!run.stopRequested && !run.controller.signal.aborted) {
                 await this.presenter.open(runtime, run.id, () => this.stop(runtime), this.nextEventSeq(runtime))
             }
@@ -443,7 +475,12 @@ export class AgentService {
     ): Promise<string|null> {
         runtime.state.next('WAITING_INTERACTION')
         let value: string|null = null
-        // Remote confirmation prompts are user decisions, never model decisions.
+        const mode = this.permissions.mode(runtime)
+        if (kind === 'yes-no' && run.executingAuthorization?.mode === mode && ['full', 'unrestricted'].includes(mode)) {
+            await this.sessions.append(runtime, 'interaction', { prompt: run.sensitive.protect(prompt), kind, response: 'y', automatic: true, permissionMode: mode }, run.id)
+            runtime.state.next('EXECUTING')
+            return /yes\s*\/\s*no/i.test(prompt) ? 'yes' : 'y'
+        }
         await this.presenter.open(runtime, run.id, () => this.stop(runtime), this.nextEventSeq(runtime))
         try {
             const form = await this.interactions.requestForm({

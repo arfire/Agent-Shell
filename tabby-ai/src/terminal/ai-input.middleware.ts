@@ -119,10 +119,17 @@ export class AIInputMiddleware extends SessionMiddleware {
                 return
             }
             if (this.canCapture && !this.escape && !this.paste && /^[^\x00-\x1f\x7f-\x9f]+$/.test(input)) {
-                await this.flushTerminal()
-                this.captureAnchor()
+                if (!this.anchor) {
+                    await this.flushTerminal()
+                    this.captureAnchor()
+                }
+                const frontend = this.runtime.tab.frontend
+                const append = this.cursor === this.buffer.length && frontend instanceof XTermFrontend &&
+                    !!this.anchor && !this.anchor.isDisposed && this.anchorColumns === frontend.xterm.cols
                 this.insert(input)
-                await this.paint()
+                // Appending needs no cursor inspection or full-line repaint. Queued
+                // writes preserve order; editing/resizing still uses the full path.
+                if (append) { await this.runtime.tab.write(terminalText(input)) } else { await this.paint() }
                 return
             }
             if (!this.canCapture && !this.buffer) {

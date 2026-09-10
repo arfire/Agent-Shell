@@ -1,13 +1,14 @@
 import { Component, HostBinding, OnDestroy } from '@angular/core'
 import { ToastrService } from 'ngx-toastr'
 
-import { AIConfig, CommandRisk } from '../config/config-schema'
+import { AIConfig, CommandRisk, defaultWebConfig, WebConfig } from '../config/config-schema'
 import { AgentPermissionsService, approvalAction } from '../policy/agent-permissions.service'
 import { CommandPolicyService } from '../policy/command-policy.service'
 import { AIInputDetector } from '../terminal/input-detector'
 import { AIConfigService } from '../config/ai-config.service'
 import { ChatCompletionsClient } from '../llm/chat-completions.client'
 import { ModelCheck, ModelCompatibilityService } from '../llm/model-compatibility.service'
+import { WebService } from '../web/web.service'
 
 @Component({
     selector: 'ash-ai-settings',
@@ -31,8 +32,14 @@ export class AISettingsTabComponent implements OnDestroy {
     availableModels: string[] = []
     modelPickerVisible = false
     section = 'model'
+    web: WebConfig = defaultWebConfig()
+    webTesting = false
+    webResult: { success: boolean, message: string }|null = null
+    private webController?: AbortController
+    private webRevision = 0
     readonly sections = [
         { id: 'model', label: '模型连接' }, { id: 'input', label: '命令识别' },
+        { id: 'web', label: '联网搜索' },
         { id: 'policy', label: '执行权限' }, { id: 'redaction', label: '敏感信息' },
     ]
 
@@ -57,6 +64,7 @@ export class AISettingsTabComponent implements OnDestroy {
         public permissions: AgentPermissionsService,
         private policy: CommandPolicyService,
         private detector: AIInputDetector,
+        private webService: WebService,
     ) {
         void this.load()
     }
@@ -99,6 +107,56 @@ export class AISettingsTabComponent implements OnDestroy {
     ngOnDestroy (): void {
         this.destroyed = true
         this.cancelCheck()
+        this.cancelWebCheck()
+    }
+
+    markWebChanged (): void {
+        this.webRevision++
+        this.cancelWebCheck()
+        this.webResult = null
+    }
+
+    setWebEngines (value: string): void {
+        this.web.engines = [...new Set(value.split(/[,，]/).map(engine => engine.trim()).filter(Boolean))]
+        this.markWebChanged()
+    }
+
+    cancelWebCheck (): void {
+        this.webController?.abort(new DOMException('检查已取消', 'AbortError'))
+    }
+
+    async testWeb (model = false): Promise<void> {
+        if (this.webTesting || !this.model) { return }
+        const controller = new AbortController()
+        const revision = ++this.webRevision
+        this.webController = controller
+        this.webTesting = true
+        this.webResult = null
+        try {
+            let message = ''
+            if (model) {
+                const settings = { ...this.web.useDefaultModel ? this.model.llm : this.web.model }
+                const checks = await this.compatibility.check(settings, () => undefined, controller.signal)
+                const failures = checks.filter(check => check.state !== 'passed')
+                if (failures.length) { throw new Error(failures.map(check => `${check.label}：${check.message}`).join('；')) }
+                message = '联网模型检查通过，支持流式回答和工具调用。'
+            } else {
+                const settings = JSON.parse(JSON.stringify(this.web)) as WebConfig
+                message = await this.webService.testConnection(settings, controller.signal)
+            }
+            if (!this.destroyed && revision === this.webRevision) {
+                this.webResult = { success: !controller.signal.aborted, message: controller.signal.aborted ? '检查已取消。' : message }
+            }
+        } catch (error) {
+            if (!this.destroyed && revision === this.webRevision) {
+                // Never echo a model provider's response body, which may reflect credentials.
+                this.webResult = { success: false, message: controller.signal.aborted ? '检查已取消。'
+                    : model ? '联网模型检查失败，请检查地址、密钥、模型名称及工具调用支持。' : String(error) }
+            }
+        } finally {
+            this.webTesting = false
+            this.webController = undefined
+        }
     }
 
     async loadModels (): Promise<void> {
@@ -151,6 +209,7 @@ export class AISettingsTabComponent implements OnDestroy {
     }
 
     markChanged (): void {
+        if (this.web.useDefaultModel) { this.markWebChanged() }
         this.checkRevision++
         this.cancelCheck()
         this.modelChecks = []
@@ -183,6 +242,11 @@ export class AISettingsTabComponent implements OnDestroy {
         if (this.section === 'input') { this.model.inputDetection = defaults.inputDetection }
         if (this.section === 'policy') { this.model.policy = defaults.policy }
         if (this.section === 'redaction') { this.model.redaction = defaults.redaction }
+        if (this.section === 'web') {
+            this.markWebChanged()
+            const previous = this.web
+            this.model.web = { ...defaultWebConfig(), ...defaults.web, baseURL: previous.baseURL, authorization: previous.authorization, model: { ...previous.model } }
+        }
         if (this.section === 'model') {
             this.markChanged()
             this.model.agent = defaults.agent
@@ -202,6 +266,8 @@ export class AISettingsTabComponent implements OnDestroy {
 
     private prepareModel (): void {
         if (!this.model) { return }
+        this.model.web ??= defaultWebConfig()
+        this.web = this.model.web
         this.model.policy.approvalMode ??= 'configured'
         this.model.policy.commandRules ??= []
         this.shellCommands = this.model.inputDetection.shellCommands.join('\n')

@@ -13,6 +13,7 @@ const directory = path.join(root, '.build-cache', 'native-agent-ui-' + Date.now(
 fs.mkdirSync(path.join(directory, 'tabby-ai'), { recursive: true })
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 const requests = []
+const rendererErrors = []
 const model = http.createServer(async (req, res) => {
     let body = ''
     for await (const chunk of req) body += chunk
@@ -31,6 +32,10 @@ const model = http.createServer(async (req, res) => {
     if (request.tools?.[0]?.function.name === 'ash_connection_check') {
         if (toolDone) { delta({ content: JSON.parse(messages.at(-1).content).value }) }
         else { delta({ tool_calls: [{ index: 0, id: 'compatibility-check', type: 'function', function: { name: 'ash_connection_check', arguments: '{"text":"ash-check"}' } }] }) }
+    } else if (lastUser.includes('放手一搏配置测试') && !toolDone) {
+        delta({ tool_calls: [{ index: 0, id: 'unrestricted-config-test', type: 'function', function: { name: 'terminal_exec', arguments: JSON.stringify({ command: "printf 'DB_PASSWORD=ASH_QA_ONLY_SYNTHETIC_SECRET\\n' > /tmp/ash-permission-qa.env; cat /tmp/ash-permission-qa.env", reason: '仅读写临时容器中的合成配置，验证第四档' }) } }] })
+    } else if (lastUser.includes('完全放行双确认测试') && !toolDone) {
+        delta({ tool_calls: [{ index: 0, id: 'full-double-test', type: 'function', function: { name: 'terminal_exec', arguments: JSON.stringify({ command: 'touch /tmp/ash-full-qa; chmod 600 /tmp/ash-full-qa', reason: '临时容器文件权限测试，验证双确认自动批准' }) } }] })
     } else if (lastUser.includes('删除卷审批测试') && !toolDone) {
         delta({ tool_calls: [{ index: 0, id: 'destructive-guard-test', type: 'function', function: { name: 'terminal_exec', arguments: JSON.stringify({ command: 'docker compose down -v', reason: '验证删除卷必须二次确认；测试会拒绝执行' }) } }] })
     } else if (lastUser.includes('凭据边界测试') && !toolDone) {
@@ -88,6 +93,11 @@ async function main () {
         if (waiting.has(message.id)) { waiting.get(message.id)(message); waiting.delete(message.id) }
         if (message.method === 'Runtime.exceptionThrown' || message.method === 'Runtime.consoleAPICalled') {
             fs.appendFileSync(path.join(directory, 'renderer.log'), JSON.stringify(message) + '\n')
+            if (message.method === 'Runtime.exceptionThrown') {
+                rendererErrors.push(message.params.exceptionDetails.exception?.description ?? message.params.exceptionDetails.text)
+            } else if (message.params.type === 'error') {
+                rendererErrors.push(...message.params.args.filter(arg => arg.subtype === 'error').map(arg => arg.description))
+            }
         }
     }
     socket.on('message', handleMessage)
@@ -105,6 +115,31 @@ async function main () {
         return result.result?.value
     }
     await call('Runtime.enable')
+    if (process.env.ASH_TEST_STARTUP_ONLY === '1') {
+        for (let attempt = 0; attempt < 150; attempt++) {
+            if (await evaluate(`!!document.querySelector('button[aria-label="Agent-Shell · GitHub"]')`)) break
+            if (attempt === 149) throw new Error('Production startup did not render the toolbar')
+            await delay(100)
+        }
+        assert.equal(await evaluate('!!window.ng?.getComponent'), false, 'Expected production Angular mode')
+        const target = await evaluate(`(async()=>{
+            const shell=require('electron').shell, open=shell.openExternal
+            let target=null
+            shell.openExternal=async url=>{target=url}
+            try {
+                document.querySelector('button[aria-label="Agent-Shell · GitHub"]').click()
+                await new Promise(resolve=>setTimeout(resolve,0))
+                return target
+            } finally { shell.openExternal=open }
+        })()`)
+        assert.equal(target, 'https://github.com/arfire/Agent-Shell')
+        await delay(500)
+        fs.writeFileSync(path.join(directory, 'production-startup.png'), Buffer.from((await call('Page.captureScreenshot', { format: 'png' })).data, 'base64'))
+        assert.deepEqual(rendererErrors, [], 'Production startup emitted renderer errors')
+        console.log('PASS production Angular startup and GitHub toolbar:', directory)
+        void evaluate('require("@electron/remote").app.exit(0)')
+        return
+    }
     const wait = async (expression, label) => {
         for (let attempt = 0; attempt < 150; attempt++) {
             if (await evaluate(expression)) return
@@ -136,10 +171,40 @@ async function main () {
         const result = await call('Page.captureScreenshot', { format: 'png' })
         fs.writeFileSync(path.join(directory, name + '.png'), Buffer.from(result.data, 'base64'))
     }
+    if (process.env.ASH_TEST_INPUT_ONLY === '1') {
+        await require('./test-input-ui.cjs').run({ evaluate, wait, screen, call })
+        assert.deepEqual(rendererErrors, [], 'Input UI emitted renderer errors')
+        await evaluate('nativeTest.session.destroy(); true')
+        void evaluate('require("@electron/remote").app.exit(0)')
+        return
+    }
+    if (process.env.ASH_TEST_SFTP_ONLY === '1') {
+        await require('./test-sftp-ui.cjs').run({ directory, evaluate, wait, screen })
+        await evaluate('nativeTest.session.destroy(); true')
+        void evaluate('require("@electron/remote").app.exit(0)')
+        return
+    }
     await send('echo "Shell 与 Agent 共用原生终端"\r')
     await wait('ng.getComponent(document.querySelector("ash-agent-dock")).runtime.terminal.value.ready', 'command prompt')
     await evaluate('nativeTest.testWrites=[]; const original=nativeTest.session.write.bind(nativeTest.session); nativeTest.session.write=data=>{nativeTest.testWrites.push(data.toString());original(data)}; true')
     const writes = await evaluate('nativeTest.testWrites.length')
+    const typing = await evaluate(`(async()=>{
+        const input=ng.getComponent(document.querySelector('ash-agent-dock')).terminal.attachments.get(nativeTest).input
+        const write=nativeTest.write.bind(nativeTest)
+        let written=0
+        nativeTest.write=text=>{written+=text.length;return write(text)}
+        const draft='输入流畅度检查abcdef'.repeat(8)
+        const started=performance.now()
+        try {
+            for(const character of draft) nativeTest.sendInput(character)
+            await input.settled()
+            const result={characters:draft.length,written,ms:Math.round(performance.now()-started)}
+            nativeTest.sendInput('\\x15');await input.settled()
+            return result
+        } finally {nativeTest.write=write}
+    })()`)
+    assert.ok(typing.written < typing.characters * 2, 'Typing repeatedly repainted the existing draft')
+    console.log('PASS Agent typing appends without full draft redraw:', typing)
     await send('帮我检查当前终端')
     assert.equal(await evaluate('nativeTest.testWrites.slice(' + writes + ').filter(text => !/^\\x1b\\[(?:[IO]|[?>]?[\\d;]*[cR])$/.test(text)).join("")'), '', 'Draft reached SSH before Enter')
     await send('\r')
@@ -225,6 +290,10 @@ async function main () {
     assert.ok(requests.some(body => JSON.parse(body).messages.some(message => message.role === 'tool' && message.tool_call_id === 'credential-guard-test' && JSON.parse(message.content).error.includes('request_user_input'))))
     await ready()
     const destructiveWrites = await evaluate('nativeTest.testWrites.length')
+    await send('完全放行双确认测试\r')
+    await wait('!ng.getComponent(document.querySelector("ash-agent-dock")).runtime.activeRunId && ng.getComponent(document.querySelector("ash-agent-dock")).runtime.state.value === "DONE"', 'full automatically approves double-confirmation commands')
+    assert.ok(requests.some(body => JSON.parse(body).messages.some(message => message.role === 'tool' && message.tool_call_id === 'full-double-test' && JSON.parse(message.content).exitCode === 0)))
+    await inZone('ng.getComponent(document.querySelector("ash-agent-dock")).runtime.approvalMode="auto";return true')
     await send('删除卷审批测试\r')
     await wait('!!document.querySelector("ash-agent-dock textarea")', 'destructive approval')
     assert.equal(await evaluate('ng.getComponent(document.querySelector("ash-agent-dock")).requests[0].confirmationsRequired'), 2)
@@ -312,8 +381,7 @@ async function main () {
     await evaluate('document.querySelector("agent-history [aria-label=显示空会话]").click();true')
     await inZone('const history=ng.getComponent(document.querySelector("agent-history"));history.startRename(history.entries.find(e=>e.id===' + JSON.stringify(oldContext) + '));history.renameText="我的排障记录";await history.rename();return true')
     await wait('ng.getComponent(document.querySelector("agent-history")).entries.some(e=>e.title==="我的排障记录")', 'custom session title persisted')
-    await inZone('const history=ng.getComponent(document.querySelector("agent-history"));await history.inspect(history.entries.find(e=>e.id===' + JSON.stringify(oldContext) + '));return true')
-    assert.match(await evaluate('ng.getComponent(document.querySelector("agent-history")).preview'), /帮我检查当前终端/)
+    assert.equal(await evaluate('!!document.querySelector("agent-history .preview, agent-history [aria-label=预览记录]")'), false, 'History preview should not take sidebar space')
     await inZone('await ng.getComponent(document.querySelector("agent-history")).load();return true')
     assert.notEqual(await evaluate('ng.getComponent(document.querySelector("ash-agent-dock")).runtime.id'), oldContext)
     await send('新的独立会话测试\r')
@@ -498,21 +566,33 @@ async function main () {
     await inZone('await nativeTestInjector.get(require("tabby-core").AppService).closeTab(qaSettingsTab);return true')
     await ready()
     await send('审批测试\r')
-    await wait('!!document.querySelector("ash-agent-dock textarea")', 'auto mode still requires modification approval')
-    await evaluate('document.querySelector("ash-agent-dock .btn-primary").click();true')
-    await wait('!ng.getComponent(document.querySelector("ash-agent-dock")).runtime.activeRunId && ng.getComponent(document.querySelector("ash-agent-dock")).runtime.state.value === "DONE"', 'approved modification completed')
+    await wait('!ng.getComponent(document.querySelector("ash-agent-dock")).runtime.activeRunId && ng.getComponent(document.querySelector("ash-agent-dock")).runtime.state.value === "DONE"', 'auto-approved modification completed')
     assert.equal(await evaluate('!!document.querySelector("ash-agent-dock textarea")'), false)
     await inZone(`
         const config=JSON.parse(JSON.stringify(qaAISettings.configService.config))
         config.policy.commandRules=[{command:'printf',risk:'DENY'}]
         await qaAISettings.configService.save(config)
-        window.localStorage.ashFullAccessAcknowledged='true'
         await ng.getComponent(document.querySelector('ash-agent-dock')).changePermission('full')
         return true
     `)
     await send('审批测试\r')
-    await wait('!ng.getComponent(document.querySelector("ash-agent-dock")).runtime.activeRunId && ng.getComponent(document.querySelector("ash-agent-dock")).runtime.state.value === "DONE"', 'legacy full mode rejects configured denied command')
+    await wait('!ng.getComponent(document.querySelector("ash-agent-dock")).runtime.activeRunId && ng.getComponent(document.querySelector("ash-agent-dock")).runtime.state.value === "DONE"', 'full mode rejects configured denied command')
     assert.equal(await evaluate('ng.getComponent(document.querySelector("ash-agent-dock")).runtime.events.value.some(e=>e.type==="approval" && e.data.automatic && e.data.permissionMode==="full" && e.data.risk==="DENY")'), false)
+    await inZone(`
+        const dock=ng.getComponent(document.querySelector('ash-agent-dock'))
+        const platform=nativeTestInjector.get(require('tabby-core').PlatformService)
+        const original=platform.showMessageBox.bind(platform)
+        delete window.localStorage.ashUnrestrictedAccessAcknowledged
+        platform.showMessageBox=async options=>{window.unrestrictedWarning=options;return {response:1}}
+        try {await dock.changePermission('unrestricted')} finally {platform.showMessageBox=original}
+        return true
+    `)
+    assert.match(await evaluate('unrestrictedWarning.detail'), /配置和凭据/)
+    await send('放手一搏配置测试\r')
+    await wait('!ng.getComponent(document.querySelector("ash-agent-dock")).runtime.activeRunId && ng.getComponent(document.querySelector("ash-agent-dock")).runtime.state.value === "DONE"', 'unrestricted reads synthetic config despite deny rule')
+    assert.ok(requests.some(body => JSON.parse(body).messages.some(message => message.role === 'tool' && message.tool_call_id === 'unrestricted-config-test' && JSON.parse(message.content).output?.includes('ASH_QA_ONLY_SYNTHETIC_SECRET'))))
+    assert.equal(await evaluate('JSON.stringify(ng.getComponent(document.querySelector("ash-agent-dock")).runtime.events.value).includes("ASH_QA_ONLY_SYNTHETIC_SECRET")'), false, 'Synthetic secret persisted in history')
+    await screen('unrestricted-permission')
     await inZone('await qaAISettings.configService.save(qaOriginalAIConfig);await ng.getComponent(document.querySelector("ash-agent-dock")).changePermission("");return true')
     // Restart the real app with the same isolated data, then reopen a saved transcript.
     const beforeRestart = requests.length
@@ -553,6 +633,7 @@ async function main () {
     assert.match(await terminalText(), /当前终端工作正常/)
     assert.equal(requests.length, beforeRestart, 'App restart replay started a model request')
     await screen('history-after-app-restart')
+    assert.deepEqual(rendererErrors.filter(error => !error.includes('QA storage failure')), [], 'Unexpected renderer errors during UI regression')
     console.log('PASS Electron + SSH (' + testShell + '): input privacy, connection isolation, empty-history deletion, connected deletion guard, retry, reconnect and app restart')
     console.log('Screenshots and isolated data:', directory)
     fs.writeFileSync(path.join(root, '.build-cache/native-agent-ui-latest.txt'), directory)

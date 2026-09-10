@@ -56,3 +56,4 @@ crowdin.yml
 !/README.md
 !/docs/USER_GUIDE.zh-CN.md
 !/docs/AGENT_CREDENTIAL_SAFETY.zh-CN.md
+!/docs/agent-web-search.md

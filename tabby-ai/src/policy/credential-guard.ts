@@ -1,5 +1,8 @@
-/** Mandatory Agent boundary, independent of configurable command approvals. */
-export function credentialAccessReason (command: string): string|undefined {
+import { ApprovalMode } from '../config/config-schema'
+
+/** Mandatory in the first three tiers; unrestricted is an explicit user opt-out. */
+export function credentialAccessReason (command: string, mode: ApprovalMode = 'configured'): string|undefined {
+    if (mode === 'unrestricted') { return undefined }
     // Also inspect quoted fragments and escaped paths inside shell/interpreter wrappers.
     const literal = command.replace(/\\\r?\n/g, '').replace(/["']/g, '')
     const normalized = literal.replace(/\\/g, '/') + '\n' + literal.replace(/\\(?=[.\w])/g, '').replace(/\\/g, '/')
@@ -14,13 +17,16 @@ export function credentialAccessReason (command: string): string|undefined {
     const secretVariable = /(?:\$\{?|%)[\w]*(?:password|passwd|pwd|token|secret|api_?key|private_?key|access_?key)[\w]*(?:\}|%)?|\b(?:get|list|show|retrieve)[-_ ]?(?:password|secret|credential)s?\b/i
     const exports = /\b(?:docker|podman)\b[^\r\n;|&]*\b(?:inspect|config)\b|\b(?:docker-compose|podman-compose)\b[^\r\n;|&]*\bconfig\b|\bkubectl\b[^\r\n;|&]*\b(?:secrets?|config\s+view)\b|\b(?:aws|az|gcloud|vault|op|bw|security|cmdkey|secret-tool)\b[^\r\n;|&]*\b(?:secrets?\b|secretsmanager|ssm|get-password|credential|lookup|find-generic-password|find-internet-password|read\b)|\b(?:systemctl\s+show|ps\s+[^\r\n]*e[fw]|docker\s+exec[^\r\n]*\benv)\b|\bmysql\.(?:user|global_priv)\b|\bpg_authid\b/i
     const search = /\b(?:grep|rg|ag|findstr|Select-String|jq|yq|aws|az|gcloud|vault|op|bw)\b[^\r\n;]*\b[\w.-]*(?:password|passwd|token|secret|credential|api_?key|private_?key)[\w.-]*\b|\b(?:169\.254\.169\.254|169\.254\.170\.2|metadata\.google\.internal)\b|\b(?:Get-Credential|Get-StoredCredential|Get-Secret|keyring|keytar)\b|\.(?:git-credentials|bash_history|zsh_history|psql_history|mysql_history)\b/i
-    const bulkConfig = /\b(?:cat|head|tail|less|more|Get-Content|type)\s+[^\r\n;]*\b(?:config|settings|appsettings|application|docker-compose|compose)[\w.-]*\.(?:ya?ml|json|ini|conf|toml|properties)\b/i
-    if (environment.test(normalized) || secretVariable.test(normalized) || exports.test(normalized) || search.test(normalized) || bulkConfig.test(normalized)) {
+    const configPath = /\b(?:config|settings|appsettings|application|docker-compose|compose)[\w.-]*\.(?:ya?ml|json|ini|conf|toml|properties)\b/i
+    const configRead = /\b(?:cat|head|tail|less|more|Get-Content|type|grep|rg|Select-String|jq|yq|awk|sed|cp|scp|rsync|tar|zip)\s|\b(?:open|readFileSync|readFile|read_text|read_bytes)\s*\(/i
+    const bulkConfig = configPath.test(normalized) && configRead.test(normalized)
+    if (environment.test(normalized) || secretVariable.test(normalized) || exports.test(normalized) || search.test(normalized) || bulkConfig) {
         return 'Agent 不得自行提取环境变量、容器配置、凭据存储或数据库认证信息。请使用 request_user_input(kind="secret") 获取必要凭据。'
     }
     const obscuredExecution = /\b(?:eval|Invoke-Expression|iex)\b|\b(?:base64|b64decode|frombase64string|atob|fromCharCode|String\.fromCodePoint|bytes\.fromhex|Buffer\.from)\b|-(?:enc|encodedcommand)\b|\$\{|\$\x27|\b(?:exec|compile)\s*\(/i
-    if (obscuredExecution.test(command) || /["']\s*\+\s*["']|\b(?:chr|char)\s*\(|\\x[\da-f]{2}|\\u[\da-f]{4}/i.test(command)) {
-        return 'Agent 无法检查动态拼接或编码执行的命令是否访问凭据。请改用可直接检查的明文命令；需要凭据时使用密码输入框。'
+    const obscuredSyntax = obscuredExecution.exec(command)?.[0] ?? /["']\s*\+\s*["']|\b(?:chr|char)\s*\(|\\x[\da-f]{2}|\\u[\da-f]{4}/i.exec(command)?.[0]
+    if (obscuredSyntax) {
+        return `命令包含当前凭据检查无法验证的语法“${obscuredSyntax}”，本次命令未执行。检查范围包含整段命令和写入的脚本内容，并非一律禁止 heredoc。请在原任务范围内改用可直接检查的明文命令；不要建议用户手动绕过检查。需要凭据时使用密码输入框。`
     }
     // Never accept guessed/literal passwords in model-generated login commands.
     const literals = [...command.matchAll(/(?:^|\s)(?:-p([^\s]+)|--password(?:=|\s+)([^\s]+))|\b[\w]*(?:PASSWORD|PASSWD|MYSQL_PWD|PGPASSWORD)\s*=\s*("[^"]*"|'[^']*'|[^\s;]+)/gi)]

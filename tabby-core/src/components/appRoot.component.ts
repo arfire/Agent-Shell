@@ -9,7 +9,7 @@ import { HotkeysService } from '../services/hotkeys.service'
 import { Logger, LogService } from '../services/log.service'
 import { ConfigService } from '../services/config.service'
 import { ThemesService } from '../services/themes.service'
-import { UpdaterService } from '../services/updater.service'
+import { HomeBaseService } from '../services/homeBase.service'
 import { CommandService } from '../services/commands.service'
 
 import { BaseTabComponent } from './baseTab.component'
@@ -73,14 +73,13 @@ export class AppRootComponent {
     @ViewChildren(TabBodyComponent) tabBodies: TabBodyComponent[]
     @ViewChild('activeTransfersDropdown') activeTransfersDropdown: NgbDropdown
     unsortedTabs: BaseTabComponent[] = []
-    updatesAvailable = false
     activeTransfers: FileTransfer[] = []
     private logger: Logger
 
     constructor (
         private hotkeys: HotkeysService,
         private commands: CommandService,
-        public updater: UpdaterService,
+        public homeBase: HomeBaseService,
         public hostWindow: HostWindowService,
         public hostApp: HostAppService,
         public config: ConfigService,
@@ -177,14 +176,6 @@ export class AppRootComponent {
         config.ready$.toPromise().then(async () => {
             this.leftToolbarButtons = await this.getToolbarButtons(false)
             this.rightToolbarButtons = await this.getToolbarButtons(true)
-
-            setInterval(() => {
-                if (this.config.store.enableAutomaticUpdates) {
-                    this.updater.check().then(available => {
-                        this.updatesAvailable = available
-                    })
-                }
-            }, 3600 * 12 * 1000)
         })
     }
 

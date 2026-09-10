@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import { Subject, Observable } from 'rxjs'
 import { posix as posixPath } from 'path'
+import { randomUUID } from 'crypto'
 import { Injector } from '@angular/core'
 import { FileDownload, FileUpload, Logger, LogService } from 'tabby-core'
 import * as russh from 'russh'
@@ -111,26 +112,80 @@ export class SFTPSession {
     }
 
     async upload (path: string, transfer: FileUpload): Promise<void> {
-        this.logger.info('Uploading into', path)
-        const tempPath = path + '.tabby-upload'
+        this.logger.info(`Uploading into ${path}`)
+        const tempPath = path + '.tabby-upload-' + randomUUID()
+        let handle: SFTPFileHandle|undefined = undefined
+        let written = 0
         try {
-            const handle = await this.open(tempPath, russh.OPEN_WRITE | russh.OPEN_CREATE)
+            transfer.setCompleted(false)
+            transfer.setStatus(`Uploading to ${path}`)
+            handle = await this.open(tempPath, russh.OPEN_WRITE | russh.OPEN_CREATE | russh.OPEN_TRUNCATE)
             while (true) {
+                if (transfer.isCancelled()) {
+                    throw new Error('Upload cancelled')
+                }
                 const chunk = await transfer.read()
                 if (!chunk.length) {
                     break
                 }
                 await handle.write(chunk)
+                written += chunk.length
             }
+            transfer.setStatus(`Finishing upload to ${path}`)
             await handle.close()
-            await this.unlink(path).catch(() => null)
-            await this.rename(tempPath, path)
+            handle = undefined
+            if (transfer.isCancelled()) {
+                throw new Error('Upload cancelled')
+            }
+            if (written !== transfer.getSize() || (await this.stat(tempPath)).size !== written) {
+                throw new Error('Uploaded file size does not match the source')
+            }
+            await this.replaceUploadedFile(tempPath, path)
+            if ((await this.stat(path)).size !== written) {
+                throw new Error('Could not verify the uploaded file')
+            }
             transfer.close()
+            transfer.setCompleted(true)
+            transfer.setStatus(`Uploaded to ${path}`)
         } catch (e) {
-            transfer.cancel()
-            this.unlink(tempPath).catch(() => null)
+            transfer.setStatus(`Upload failed: ${path}: ${e.message ?? e}`)
+            this.logger.error(`Upload failed: ${path}: ${e.message ?? e}`)
+            if (!transfer.isCancelled()) {
+                transfer.cancel()
+            }
+            await handle?.close().catch(() => null)
+            await this.unlink(tempPath).catch(() => null)
             throw e
         }
+    }
+
+    private async replaceUploadedFile (tempPath: string, path: string): Promise<void> {
+        try {
+            await this.rename(tempPath, path)
+            return
+        } catch (error) {
+            // Standard SFTP rename may refuse an existing target. Keep that target
+            // recoverable until the replacement has been installed successfully.
+            const existing = await this.stat(path).catch(() => null)
+            if (!existing || existing.isDirectory) {
+                throw error
+            }
+        }
+        const backupPath = tempPath + '.backup'
+        await this.rename(path, backupPath)
+        try {
+            await this.rename(tempPath, path)
+        } catch (error) {
+            try {
+                await this.rename(backupPath, path)
+            } catch (restoreError) {
+                throw new Error(`${error.message ?? error}; original file preserved at ${backupPath}: ${restoreError.message ?? restoreError}`)
+            }
+            throw error
+        }
+        await this.unlink(backupPath).catch(error => {
+            this.logger.warn(`Uploaded ${path}, but could not remove backup ${backupPath}: ${error.message ?? error}`)
+        })
     }
 
     async download (path: string, transfer: FileDownload): Promise<void> {

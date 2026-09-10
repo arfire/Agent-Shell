@@ -1,8 +1,8 @@
 .agent-controls((keydown)='$event.stopPropagation()', (keyup)='$event.stopPropagation()', (mousedown)='$event.stopPropagation()', (click)='$event.stopPropagation()')
     .mode-bar
-        button.btn.btn-sm.btn-link.mode-button(type='button', (click)='toggleMode()', [attr.aria-pressed]='runtime.terminal.value.mode === "agent"') {{ runtime.terminal.value.mode === 'agent' ? 'Agent 模式' : 'Shell 模式' }}
-        ng-container(*ngIf='runtime.terminal.value.mode === "agent"')
-            select.form-select.form-select-sm.permission-select(#permissionSelect, [ngModel]='runtime.approvalMode || ""', (ngModelChange)='changePermission($event, permissionSelect)', [disabled]='changingPermission', [class.text-warning]='permissions.mode(runtime) === "full"', aria-label='Agent 执行权限', title='仅此连接生效，从下一条命令开始应用；重新连接后跟随设置')
+        button.btn.btn-sm.btn-link.mode-button(type='button', (click)='toggleMode()', [disabled]='!configReady', [attr.aria-pressed]='runtime.terminal.value.mode === "agent"') {{ runtime.terminal.value.mode === 'agent' ? 'Agent 模式' : 'Shell 模式' }}
+        ng-container(*ngIf='configReady && runtime.terminal.value.mode === "agent"')
+            select.form-select.form-select-sm.permission-select(#permissionSelect, [ngModel]='runtime.approvalMode || ""', (ngModelChange)='changePermission($event, permissionSelect)', [disabled]='changingPermission', [class.text-warning]='permissions.mode(runtime) === "full" || permissions.mode(runtime) === "unrestricted"', aria-label='Agent 执行权限', title='仅此连接生效，从下一条命令开始应用；重新连接后跟随设置')
                 option(value='') 跟随设置 · {{ defaultPermissionLabel }}
                 option(*ngFor='let mode of permissions.modes', [value]='mode.value') {{ mode.label }}
             button.btn.btn-sm.btn-link(type='button', [disabled]='!runtime.terminal.value.ready', (click)='terminal.submit(runtime, "shell")', title='跳过识别，发送当前完整输入') 发送到 Shell

@@ -19,7 +19,6 @@ export class AgentHistoryComponent implements OnInit, OnDestroy {
     @Input() tab: BaseTabComponent|null = null
     entries: SessionMetadata[] = []
     selected: SessionMetadata|null = null
-    preview = ''
     query = ''
     allServers = false
     showEmpty = false
@@ -35,7 +34,6 @@ export class AgentHistoryComponent implements OnInit, OnDestroy {
     profileId = ''
     profiles: PartialProfile<Profile>[] = []
     private subscription?: Subscription
-    private generation = 0
 
     constructor (
         public store: AISessionStore,
@@ -125,8 +123,7 @@ export class AgentHistoryComponent implements OnInit, OnDestroy {
                     await this.sessions.deleteContext(entry.id)
                     removed++
                     this.checked.delete(entry.id)
-                    this.generation++
-                    if (this.selected?.id === entry.id) { this.selected = null; this.preview = ''; this.linking = false }
+                    if (this.selected?.id === entry.id) { this.selected = null; this.linking = false }
                     if (this.renameId === entry.id) { this.renameId = '' }
                 } catch (error) { failures.push(`${entry.title ?? '未命名会话'}：${String(error)}`) }
             }
@@ -148,9 +145,10 @@ export class AgentHistoryComponent implements OnInit, OnDestroy {
         if (this.busy) { return }
         this.busy = true
         this.linking = false
+        this.selected = entry
+        this.confirmedTarget = ''
         this.error = ''
         try {
-            await this.inspect(entry)
             await this.launcher.open(entry)
             this.notice = '已打开对应终端，连接就绪后显示历史记录。'
         } catch (error) {
@@ -173,24 +171,6 @@ export class AgentHistoryComponent implements OnInit, OnDestroy {
             const updated = (await this.store.list()).find(candidate => candidate.id === entry.id)!
             await this.open(updated)
         } catch (error) { this.error = String(error) }
-    }
-
-    async inspect (entry: SessionMetadata): Promise<void> {
-        const generation = ++this.generation
-        this.selected = entry
-        this.preview = '正在读取…'
-        this.confirmedTarget = ''
-        this.error = ''
-        try {
-            const events = await this.store.read(entry.id, 200)
-            if (generation !== this.generation) { return }
-            this.preview = events.filter(event => ['user-ai-input', 'ai-message', 'ssh-input', 'ssh-output', 'command-result'].includes(event.type)).map(event => {
-                const data = event.data as Record<string, unknown>
-                const content = event.type === 'command-result' ? JSON.stringify(data) : data.content
-                const label = event.type.startsWith('ssh-') ? 'Shell' : event.type === 'user-ai-input' ? '你' : 'Agent'
-                return `${label} · ${event.time}\n${String(content ?? '').slice(0, 12000)}`
-            }).join('\n\n').slice(-60000) || '这次会话还没有对话记录。'
-        } catch (error) { if (generation === this.generation) { this.error = String(error); this.preview = '' } }
     }
 
     async load (entry?: SessionMetadata): Promise<void> {
@@ -218,7 +198,6 @@ export class AgentHistoryComponent implements OnInit, OnDestroy {
     }
 
     ngOnDestroy (): void {
-        this.generation++
         this.subscription?.unsubscribe()
     }
 }
