@@ -9,6 +9,7 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
         const runtime: any = {
             id: 'shared-transcript', connectionId, activeRunId: 'run-' + connectionId,
             state: new BehaviorSubject('WAITING_APPROVAL'),
+            events: new BehaviorSubject([]), liveText: new BehaviorSubject(''),
             terminal: new BehaviorSubject({ state: 'prompt' }),
             tab: { profile: { name: connectionId, options: { user: 'tester', host: connectionId + '.example', port: 2222 } }, frontend: { focus: () => undefined } },
         }

@@ -4,7 +4,6 @@ import { ToastrService } from 'ngx-toastr'
 import { AIConfig, CommandRisk, defaultWebConfig, WebConfig } from '../config/config-schema'
 import { AgentPermissionsService, approvalAction } from '../policy/agent-permissions.service'
 import { CommandPolicyService } from '../policy/command-policy.service'
-import { AIInputDetector } from '../terminal/input-detector'
 import { AIConfigService } from '../config/ai-config.service'
 import { ChatCompletionsClient } from '../llm/chat-completions.client'
 import { ModelCheck, ModelCompatibilityService } from '../llm/model-compatibility.service'
@@ -38,7 +37,7 @@ export class AISettingsTabComponent implements OnDestroy {
     private webController?: AbortController
     private webRevision = 0
     readonly sections = [
-        { id: 'model', label: '模型连接' }, { id: 'input', label: '命令识别' },
+        { id: 'model', label: '模型连接' },
         { id: 'web', label: '联网搜索' },
         { id: 'policy', label: '执行权限' }, { id: 'redaction', label: '敏感信息' },
     ]
@@ -63,7 +62,6 @@ export class AISettingsTabComponent implements OnDestroy {
         private compatibility: ModelCompatibilityService,
         public permissions: AgentPermissionsService,
         private policy: CommandPolicyService,
-        private detector: AIInputDetector,
         private webService: WebService,
     ) {
         void this.load()
@@ -227,11 +225,10 @@ export class AISettingsTabComponent implements OnDestroy {
         if (!this.model || !this.previewCommand.trim()) { this.previewResult = ''; return }
         this.syncCommands()
         try {
-            const shell = this.detector.isShellCommand(this.previewCommand, undefined, this.model.inputDetection)
             const decision = this.policy.evaluate(this.previewCommand, undefined, this.model.policy)
             const action = approvalAction(decision.risk, this.model.policy.approvalMode ?? 'configured')
             const label = { execute: '自动执行', ask: decision.risk === 'DANGEROUS' ? '二次确认' : '需要审批', deny: '拦截' }[action]
-            this.previewResult = `自动识别：${shell ? 'Shell' : 'Agent'}；若由 Agent 执行：${label}。`
+            this.previewResult = `Agent 执行此命令：${label}。`
         } catch (error) { this.previewResult = String(error) }
     }
 

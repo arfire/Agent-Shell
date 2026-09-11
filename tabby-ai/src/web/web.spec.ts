@@ -185,7 +185,7 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
             } }
             const agent: any = new AgentService(config, mainClient as any, { build: () => [] } as any, null as any, redactor,
                 { append: async (_runtime: unknown, type: string, data: unknown) => { timeline.push({ type, data }) } } as any,
-                null as any, null as any, { execute: () => { throw new Error('SSH must not execute') } } as any, null as any, null as any, service)
+                null as any, null as any, { execute: () => { throw new Error('SSH must not execute') } } as any, null as any, { mode: () => 'configured' } as any, service)
             const runtime: any = { state: new BehaviorSubject('THINKING'), liveText: new BehaviorSubject(''), tab: { session: {} } }
             const run: any = { id: 'web-loop', controller: new AbortController(), stopRequested: false, sensitive: redactor.createScope(), session: runtime.tab.session }
             await agent.runLoop(runtime, run, '联网查文档')

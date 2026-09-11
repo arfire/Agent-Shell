@@ -5,13 +5,19 @@
             select.form-select.form-select-sm.permission-select(#permissionSelect, [ngModel]='runtime.approvalMode || ""', (ngModelChange)='changePermission($event, permissionSelect)', [disabled]='changingPermission', [class.text-warning]='permissions.mode(runtime) === "full" || permissions.mode(runtime) === "unrestricted"', aria-label='Agent 执行权限', title='仅此连接生效，从下一条命令开始应用；重新连接后跟随设置')
                 option(value='') 跟随设置 · {{ defaultPermissionLabel }}
                 option(*ngFor='let mode of permissions.modes', [value]='mode.value') {{ mode.label }}
-            button.btn.btn-sm.btn-link(type='button', [disabled]='!runtime.terminal.value.ready', (click)='terminal.submit(runtime, "shell")', title='跳过识别，发送当前完整输入') 发送到 Shell
-            button.btn.btn-sm.btn-link(type='button', [disabled]='!runtime.terminal.value.ready', (click)='terminal.submit(runtime, "agent")', title='跳过识别，发送当前完整输入') 发送给 Agent
+            button.btn.btn-sm.btn-link(type='button', (click)='showTranscript = !showTranscript', [attr.aria-expanded]='showTranscript') {{showTranscript ? '收起记录' : '展开记录'}}
         span.agent-status(*ngIf='runtime.activeRunId && runtime.terminal.value.mode === "agent"') {{ statusLabel }}
         button.btn.btn-sm.btn-link.stop-button(*ngIf='runtime.activeRunId && runtime.terminal.value.mode === "agent"', type='button', (click)='runtime.stopAgent?.()') 停止 Agent
+    ng-container(*ngIf='runtime.terminal.value.mode === "agent" && !requests.length && !forms.length')
+        .agent-transcript(#transcriptView, *ngIf='showTranscript && (transcript || runtime.liveText.value)', (scroll)='transcriptScrolled()', tabindex='0', aria-label='Agent 会话记录')
+            pre {{transcript}}
+            pre(*ngIf='runtime.liveText.value') {{runtime.liveText.value}}
+        .agent-composer
+            textarea.form-control(rows='2', [(ngModel)]='draft', (keydown)='composerKey($event)', placeholder='让 Agent 做什么？Enter 发送，Shift+Enter 换行', aria-label='Agent 请求', spellcheck='false')
+            button.btn.btn-sm.btn-primary(type='button', [disabled]='!configReady || !runtime.terminal.value.ready || !!runtime.activeRunId || runtime.locked || !draft.trim()', (click)='send()') 发送
     .notice(*ngIf='runtime.terminal.value.notice', role='status') {{ runtime.terminal.value.notice }}
     .notice(*ngIf='runtime.terminal.value.failureReason')
-        button.btn.btn-sm.btn-link.retry-integration(type='button', (click)='retryIntegration()', [disabled]='runtime.terminal.value.state !== "unavailable" || !!runtime.activeRunId || runtime.locked') 重试终端集成
+        button.btn.btn-sm.btn-link.retry-integration(type='button', (click)='retryIntegration()', [disabled]='runtime.terminal.value.state !== "unavailable" || !!runtime.activeRunId || runtime.locked') 重试 Agent 连接
         button.btn.btn-sm.btn-link(type='button', (click)='showFailure = !showFailure', [attr.aria-expanded]='showFailure') {{showFailure ? '收起原因' : '查看原因'}}
         pre.text-break(*ngIf='showFailure') {{runtime.terminal.value.failureReason}}
     ng-container(*ngIf='store.persistence | async as saving')

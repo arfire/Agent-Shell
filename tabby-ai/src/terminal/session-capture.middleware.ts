@@ -3,11 +3,13 @@ import { StringDecoder } from 'string_decoder'
 
 import { AISessionRuntime, AISessionService } from '../session/ai-session.service'
 import { SecretRedactor } from '../policy/secret-redactor'
+import { TerminalHistoryFilter } from './terminal-history-filter'
 
 export class AISessionCaptureMiddleware extends SessionMiddleware {
     private outputBuffer = ''
     private flushTimer?: ReturnType<typeof setTimeout>
     private decoder = new StringDecoder('utf8')
+    private history = new TerminalHistoryFilter()
     private outputFilter = this.redactor.createScope().streamFilter(true)
     private sessionId: string
     private flushOutput = (): void => this.flush()
@@ -24,6 +26,7 @@ export class AISessionCaptureMiddleware extends SessionMiddleware {
 
     feedFromSession (data: Buffer): void {
         if (this.sessionId !== this.runtime.id) {
+            this.outputBuffer += this.outputFilter(this.history.flush())
             this.outputBuffer += this.outputFilter.flush()
             this.flush()
             this.outputFilter = this.redactor.createScope().streamFilter(true)
@@ -31,7 +34,7 @@ export class AISessionCaptureMiddleware extends SessionMiddleware {
         }
         // Persist complete, redacted lines so a timer cannot split a password
         // across two otherwise innocuous history events.
-        this.outputBuffer += this.outputFilter(this.decoder.write(data))
+        this.outputBuffer += this.outputFilter(this.history.feed(this.decoder.write(data)))
         if (this.outputBuffer.length >= 262144) {
             this.flush()
         } else if (!this.flushTimer) {
@@ -49,7 +52,7 @@ export class AISessionCaptureMiddleware extends SessionMiddleware {
         if (this.flushTimer) {
             clearTimeout(this.flushTimer)
         }
-        this.outputBuffer += this.outputFilter(this.decoder.end()) + this.outputFilter.flush()
+        this.outputBuffer += this.outputFilter(this.history.feed(this.decoder.end()) + this.history.flush()) + this.outputFilter.flush()
         this.flush()
         super.close()
     }

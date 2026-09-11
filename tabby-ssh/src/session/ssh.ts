@@ -886,6 +886,14 @@ export class SSHSession {
         return ch
     }
 
+    /** Open an independent non-PTY channel on this authenticated connection. */
+    async openExecChannel (): Promise<russh.Channel> {
+        if (!(this.ssh instanceof russh.AuthenticatedSSHClient)) {
+            throw new Error('SSH authentication is not complete')
+        }
+        return this.ssh.activateChannel(await this.ssh.openSessionChannel())
+    }
+
     /** Run a bounded, non-PTY capability probe without typing into the user's shell. */
     async probeShell (): Promise<string> {
         if (!(this.ssh instanceof russh.AuthenticatedSSHClient)) {

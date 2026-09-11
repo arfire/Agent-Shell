@@ -21,7 +21,7 @@ const TERMINAL_TOOLS: ChatTool[] = [{
     type: 'function',
     'function': {
         name: 'terminal_exec',
-        description: 'Execute one command step using the current SSH shell syntax and return its output and exit code.',
+        description: 'Execute a noninteractive command in a fresh process on the current SSH connection (no PTY, stdin closed, 120-second timeout). Return output and exit code. Use absolute paths; cd/export do not persist between calls. Never start pagers or interactive editors.',
         parameters: {
             type: 'object',
             properties: {
@@ -91,7 +91,7 @@ export class AgentService {
         private web?: WebService,
     ) { }
 
-    async start (runtime: AISessionRuntime, input: string, inputMiddleware: AIInputMiddleware): Promise<void> {
+    async start (runtime: AISessionRuntime, input: string, inputMiddleware?: AIInputMiddleware): Promise<void> {
         if (!!runtime.activeRunId || runtime.state.value === 'LOADING_CONTEXT') {
             return
         }
@@ -170,9 +170,9 @@ export class AgentService {
             // Reset the shadow readline state and enqueue the fresh prompt
             // before accepting another xterm/IME commit. Otherwise a very
             // quick next input can race the previous run's cleanup.
-            inputMiddleware.resetInputBuffer()
+            inputMiddleware?.resetInputBuffer()
             runtime.locked = false
-            runtime.terminal.next({ ...runtime.terminal.value, ready: inputMiddleware.canCapture })
+            runtime.terminal.next({ ...runtime.terminal.value, ready: inputMiddleware?.canCapture ?? runtime.terminal.value.ready })
             runtime.tab.frontend?.focus()
             complete()
         }

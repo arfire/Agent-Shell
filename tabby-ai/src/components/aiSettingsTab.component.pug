@@ -155,18 +155,6 @@ ng-container(*ngIf='model')
                 .header
                     .title 单页正文字符上限
                 input.form-control(type='number', min='1000', max='30000', step='1000', [(ngModel)]='web.maxPageChars', (ngModelChange)='markWebChanged()', aria-label='正文字符上限')
-    .settings-section(*ngIf='section === "input"')
-        p.text-muted Agent 模式下，这些命令会优先识别为 Shell。每行一个命令名，多行命令仍按完整输入识别。
-        label(for='ai-shell-commands') Shell 命令列表
-        textarea#ai-shell-commands.form-control.command-list(rows='10', [(ngModel)]='shellCommands', spellcheck='false')
-        .form-line
-            .header
-                .title 强制发送 Agent 快捷键
-            input.form-control(type='text', [(ngModel)]='model.inputDetection.forceAgentShortcut', placeholder='Shift+Enter')
-        .form-line
-            .header
-                .title 强制发送 Shell 快捷键
-            input.form-control(type='text', [(ngModel)]='model.inputDetection.forceShellShortcut', placeholder='Ctrl+Enter')
     .settings-section(*ngIf='section === "policy"')
         label(for='ai-approval-mode') 默认执行权限
         select#ai-approval-mode.form-select([(ngModel)]='model.policy.approvalMode')
@@ -200,7 +188,7 @@ ng-container(*ngIf='model')
             input(type='checkbox', [ngModel]='rule.enabled !== false', (ngModelChange)='rule.enabled = $event', [disabled]='!model.redaction.enabled')
             span {{ rule.name }}
         p.setting-help 密码和 Token 的临时输入、占位符及本地恢复继续独立保留。
-    .command-preview(*ngIf='section === "input" || section === "policy"')
+    .command-preview(*ngIf='section === "policy"')
         label(for='ai-command-preview') 试一下规则
         .input-group
             input#ai-command-preview.form-control(type='text', [(ngModel)]='previewCommand', placeholder='输入一条命令，不会实际执行')

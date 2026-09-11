@@ -73,13 +73,11 @@ div.mt-4
             .description(*ngIf='config.store.terminal.rightClick == "paste"', translate) Long-click for context menu
 
         select.form-control(
-            [(ngModel)]='config.store.terminal.rightClick',
-            (ngModelChange)='config.save()'
+            [ngModel]='config.store.terminal.rightClick === "off" ? "off" : "menu"',
+            (ngModelChange)='config.store.terminal.rightClick = $event; config.save()'
         )
             option(ngValue='off', translate) Off
             option(ngValue='menu', translate) Context menu
-            option(ngValue='paste', translate) Paste
-            option(ngValue='clipboard', translate) Paste if no selection, else copy
 
     .form-line
         .header

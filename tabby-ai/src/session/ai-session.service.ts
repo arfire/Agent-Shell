@@ -24,6 +24,7 @@ export interface AISessionRuntime {
     historyToRestore?: SessionEvent[]
     approvalMode?: ApprovalMode
     shellKind?: string
+    independentExecution?: boolean
     terminal: BehaviorSubject<{
         mode: 'agent'|'shell'
         ready: boolean

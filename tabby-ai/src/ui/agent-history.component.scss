@@ -1,4 +1,4 @@
-:host { display: flex; flex: 1; min-height: 0; flex-direction: column; }
+:host { display: flex; flex: 1; min-height: 0; min-width: 0; overflow: auto; flex-direction: column; }
 .history-tree { flex: 1; min-height: 80px; overflow: auto; padding: 0 8px; }
 summary { padding: 8px 0; overflow-wrap: anywhere; cursor: pointer; }
 .session { display: block; width: 100%; text-align: left; border: 0; background: transparent; color: inherit; padding: 8px 12px; }
@@ -8,3 +8,4 @@ summary { padding: 8px 0; overflow-wrap: anywhere; cursor: pointer; }
 .session-row { display: flex; align-items: center; flex-wrap: wrap; }
 .session-row .session { flex: 1; min-width: 0; width: auto; }
 .association { border-top: 1px solid var(--theme-secondary); }
+.session-row .input-group { flex-basis: 100%; min-width: 0; }

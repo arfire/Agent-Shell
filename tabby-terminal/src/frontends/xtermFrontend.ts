@@ -640,8 +640,10 @@ export class XTermFrontend extends Frontend {
         host.addEventListener('dragOver', (event: any) => this.dragOver.next(event))
         host.addEventListener('drop', event => this.drop.next(event))
 
-        host.addEventListener('mousedown', event => this.mouseEvent.next(event))
-        host.addEventListener('mouseup', event => this.mouseEvent.next(event))
+        // Handle clipboard/menu clicks before xterm clears the selection or reports
+        // the same right click to a mouse-aware remote program such as Vim.
+        host.addEventListener('mousedown', event => this.mouseEvent.next(event), true)
+        host.addEventListener('mouseup', event => this.mouseEvent.next(event), true)
         host.addEventListener('mousewheel', event => this.mouseEvent.next(event as MouseEvent))
         host.addEventListener('contextmenu', event => {
             event.preventDefault()

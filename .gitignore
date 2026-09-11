@@ -52,6 +52,8 @@ sentry-symbols.js
 crowdin.yml
 .crowdin.env
 *.md
+!docs/TERMINAL_AGENT_FIXES.zh-CN.md
+!docs/AGENT_BLACKBOX_TESTS.zh-CN.md
 !AGENTS.md
 !/README.md
 !/docs/USER_GUIDE.zh-CN.md

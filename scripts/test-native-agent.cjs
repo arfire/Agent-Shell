@@ -29,7 +29,7 @@ function load (file) {
         compilerOptions: { target: ts.ScriptTarget.ES2021, module: ts.ModuleKind.CommonJS, experimentalDecorators: true },
     }).outputText
     const localRequire = id => {
-        if (id === '@angular/core') return { Injectable: () => value => value, Component: () => value => value, Input: () => () => undefined }
+        if (id === '@angular/core') return { Injectable: () => value => value, Component: () => value => value, Input: () => () => undefined, ViewChild: () => () => undefined }
         if (id === 'tabby-core') return { SubscriptionContainer }
         if (id === 'tabby-terminal') return { ...load('tabby-terminal/src/api/middleware.ts'), XTermFrontend }
         // Simulate a Windows checkout even when the tests run on Unix.
@@ -80,6 +80,7 @@ async function fixture () {
 }
 
 async function main () {
+    await load('tabby-ai/src/terminal/ssh-exec.spec.ts').runTests(test)
     await test('shell bootstrap normalizes Windows script line endings before encoding', () => {
         for (const kind of ['bash', 'zsh', 'fish', 'powershell']) {
             const command = shellBootstrap(kind, 'newline-test')

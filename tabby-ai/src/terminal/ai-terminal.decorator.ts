@@ -4,7 +4,6 @@ import { BaseTerminalTabComponent, SessionMiddlewareStack, TerminalDecorator, XT
 
 import { AISessionService } from '../session/ai-session.service'
 import { AgentService } from '../agent/agent.service'
-import { AIInputMiddleware } from './ai-input.middleware'
 import { AISessionCaptureMiddleware } from './session-capture.middleware'
 import { TerminalControllerService } from './terminal-controller.service'
 import { AgentTerminalPresenter } from '../terminal/agent-terminal-presenter'
@@ -79,8 +78,8 @@ export class AITerminalDecorator extends TerminalDecorator {
     }
 
     private getRequestHandler (runtime: Awaited<ReturnType<AISessionService['attach']>>) {
-        return (input: string, middleware: AIInputMiddleware) => {
-            void this.agent.start(runtime, input, middleware)
+        return (input: string) => {
+            void this.agent.start(runtime, input)
         }
     }
 }

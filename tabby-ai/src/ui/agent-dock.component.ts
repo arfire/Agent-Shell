@@ -1,4 +1,4 @@
-import { ChangeDetectorRef, Component, Input, NgZone, OnDestroy, OnInit } from '@angular/core'
+import { AfterViewChecked, ChangeDetectorRef, Component, ElementRef, Input, NgZone, OnDestroy, OnInit, ViewChild } from '@angular/core'
 import { from, Subscription } from 'rxjs'
 
 import { AISessionRuntime } from '../session/ai-session.service'
@@ -7,13 +7,17 @@ import { TerminalControllerService } from '../terminal/terminal-controller.servi
 import { ApprovalMode } from '../config/config-schema'
 import { AgentPermissionsService } from '../policy/agent-permissions.service'
 import { AISessionStore } from '../session/session-store'
+import { historyChunks } from '../terminal/session-history'
+import { terminalText } from '../terminal/terminal-text'
+import { TerminalHistoryFilter } from '../terminal/terminal-history-filter'
+import { SessionEvent } from '../session/session-event'
 
 @Component({
     selector: 'ash-agent-dock',
     templateUrl: './agent-dock.component.pug',
     styleUrls: ['./agent-dock.component.scss'],
 })
-export class AgentDockComponent implements OnInit, OnDestroy {
+export class AgentDockComponent implements OnInit, OnDestroy, AfterViewChecked {
     @Input() runtime: AISessionRuntime
     requests: ApprovalRequest[] = []
     forms: FormRequest[] = []
@@ -23,6 +27,17 @@ export class AgentDockComponent implements OnInit, OnDestroy {
     changingPermission = false
     showFailure = false
     configReady = false
+    draft = ''
+    transcript = ''
+    showTranscript = true
+    @ViewChild('transcriptView') transcriptView?: ElementRef<HTMLElement>
+    followOutput = true
+    private scrollPending = false
+    private historyOutput = new TerminalHistoryFilter()
+    private historyText = ''
+    private historyContext = ''
+    private historyCount = 0
+    private historyLast?: SessionEvent
     private subscriptions: Subscription[] = []
 
     constructor (
@@ -35,6 +50,24 @@ export class AgentDockComponent implements OnInit, OnDestroy {
     ) { }
 
     ngOnInit (): void {
+        this.subscriptions.push(this.runtime.events.subscribe(events => {
+            if (this.historyContext !== this.runtime.id || events.length < this.historyCount ||
+                this.historyCount > 0 && events[this.historyCount - 1] !== this.historyLast) {
+                this.historyOutput = new TerminalHistoryFilter()
+                this.historyText = ''
+                this.historyCount = 0
+                this.historyContext = this.runtime.id
+            }
+            for (const chunk of historyChunks(events.slice(this.historyCount), this.historyOutput, false)) {
+                this.historyText = (this.historyText + chunk).slice(-200000)
+            }
+            this.historyCount = events.length
+            this.historyLast = events.at(-1)
+            this.transcript = terminalText(this.historyText + this.historyOutput.peek()).trim()
+            this.scrollPending = true
+            this.refresh()
+        }))
+        this.subscriptions.push(this.runtime.liveText.subscribe(() => { this.scrollPending = true; this.refresh() }))
         this.subscriptions.push(
             from(this.permissions.config.ready).subscribe(() => {
                 this.configReady = true
@@ -53,6 +86,35 @@ export class AgentDockComponent implements OnInit, OnDestroy {
         this.values.clear()
         this.commands.clear()
         this.confirmed.clear()
+    }
+
+    send (): void {
+        if (this.terminal.sendRequest(this.runtime, this.draft)) {
+            this.draft = ''
+            this.showTranscript = true
+            this.followOutput = true
+            this.scrollPending = true
+        }
+    }
+
+    ngAfterViewChecked (): void {
+        const element = this.transcriptView?.nativeElement
+        if (element && this.scrollPending) {
+            this.scrollPending = false
+            if (this.followOutput) { element.scrollTop = element.scrollHeight }
+        }
+    }
+
+    transcriptScrolled (): void {
+        const element = this.transcriptView?.nativeElement
+        if (element) { this.followOutput = element.scrollHeight - element.scrollTop - element.clientHeight < 24 }
+    }
+
+    composerKey (event: KeyboardEvent): void {
+        if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+            event.preventDefault()
+            this.send()
+        }
     }
 
     private refresh (): void {

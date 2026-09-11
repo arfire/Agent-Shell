@@ -28,6 +28,7 @@ export class AgentTerminalPresenter {
     constructor (private terminal: TerminalControllerService) { }
 
     async replay (runtime: AISessionRuntime, events: SessionEvent[]): Promise<void> {
+        if (runtime.independentExecution) { return }
         if (!events.length) { return }
         if (runtime.locked || runtime.activeRunId) { throw new Error('请等待当前 Agent 完成') }
         runtime.locked = true
@@ -58,6 +59,7 @@ export class AgentTerminalPresenter {
     }
 
     async open (runtime: AISessionRuntime, runId: string, _stop?: () => void, _seq = 0): Promise<void> {
+        if (runtime.independentExecution) { return }
         if (runtime.state.value === 'WAITING_INTERACTION' && this.terminal.isExecuting(runtime)) {
             return
         }

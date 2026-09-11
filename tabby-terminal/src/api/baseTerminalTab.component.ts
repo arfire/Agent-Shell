@@ -14,6 +14,7 @@ import { TerminalDecorator } from './decorator'
 import { SearchPanelComponent } from '../components/searchPanel.component'
 import { MultifocusService } from '../services/multifocus.service'
 import { getTerminalBackgroundColor } from '../helpers'
+import { normalizePaste } from '../paste-text'
 
 
 const INACTIVE_TAB_UNLOAD_DELAY = 1000 * 30
@@ -547,17 +548,9 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
         if (this.localPasteHandler?.(data)) {
             return
         }
-        if (this.hostApp.platform === Platform.Windows) {
-            data = data.replaceAll('\r\n', '\r')
-        } else {
-            data = data.replaceAll('\n', '\r')
-        }
+        data = normalizePaste(data, this.alternateScreenActive, this.config.store.terminal.replaceNewlinesWithSpacesOnPaste)
 
-        if (this.config.store.terminal.replaceNewlinesWithSpacesOnPaste) {
-            data = data.replace(/[\r\n]+/g, ' ')
-        }
-
-        if (this.config.store.terminal.trimWhitespaceOnPaste && data.indexOf('\n') === data.length - 1) {
+        if (!this.alternateScreenActive && this.config.store.terminal.trimWhitespaceOnPaste && data.endsWith('\r') && data.indexOf('\r') === data.length - 1) {
             // Ends with a newline and has no other line breaks
             data = data.substring(0, data.length - 1)
         }
@@ -670,13 +663,10 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
         this.termContainerSubscriptions.cancelAll()
     }
 
-    private rightMouseDownTime = 0
-
     protected async handleRightMouseDown (event: MouseEvent): Promise<void> {
         event.preventDefault()
         event.stopPropagation()
-        this.rightMouseDownTime = Date.now()
-        if (this.config.store.terminal.rightClick === 'menu') {
+        if (this.config.store.terminal.rightClick !== 'off') {
             this.platform.popupContextMenu(await this.buildContextMenu(), event)
         }
     }
@@ -684,24 +674,6 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
     protected async handleRightMouseUp (event: MouseEvent): Promise<void> {
         event.preventDefault()
         event.stopPropagation()
-        if (this.config.store.terminal.rightClick === 'paste'
-            || this.config.store.terminal.rightClick === 'clipboard') {
-            const duration = Date.now() - this.rightMouseDownTime
-            if (duration < 250) {
-                if (this.config.store.terminal.rightClick === 'paste') {
-                    this.paste()
-                } else if (this.config.store.terminal.rightClick === 'clipboard') {
-                    if (this.frontend?.getSelection()) {
-                        this.frontend.copySelection()
-                        this.frontend.clearSelection()
-                    } else {
-                        this.paste()
-                    }
-                }
-            } else {
-                this.platform.popupContextMenu(await this.buildContextMenu(), event)
-            }
-        }
     }
 
     protected attachTermContainerHandlers (): void {
