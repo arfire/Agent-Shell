@@ -29,7 +29,7 @@ function load (file) {
         compilerOptions: { target: ts.ScriptTarget.ES2021, module: ts.ModuleKind.CommonJS, experimentalDecorators: true },
     }).outputText
     const localRequire = id => {
-        if (id === '@angular/core') return { Injectable: () => value => value, Component: () => value => value, Input: () => () => undefined, ViewChild: () => () => undefined }
+        if (id === '@angular/core') return { Injectable: () => value => value, Component: () => value => value, HostBinding: () => () => undefined, Input: () => () => undefined, ViewChild: () => () => undefined }
         if (id === 'tabby-core') return { SubscriptionContainer }
         if (id === 'tabby-terminal') return { ...load('tabby-terminal/src/api/middleware.ts'), XTermFrontend }
         // Simulate a Windows checkout even when the tests run on Unix.
@@ -44,6 +44,7 @@ const { AIInputDetector, unwrapShellFence } = load('tabby-ai/src/terminal/input-
 const { AIInputMiddleware } = load('tabby-ai/src/terminal/ai-input.middleware.ts')
 const { ShellIntegration, detectShellKind, shellBootstrap } = load('tabby-ai/src/terminal/shell-integration.ts')
 const { TerminalTextFilter } = load('tabby-ai/src/terminal/terminal-text.ts')
+const { CommandOutputPresentation } = load('tabby-ai/src/terminal/command-output-presentation.ts')
 const { historyChunks } = load('tabby-ai/src/terminal/session-history.ts')
 const { TerminalMarkdown, terminalMarkdown } = load('tabby-ai/src/terminal/terminal-markdown.ts')
 const { CommandFramingMiddleware } = load('tabby-ai/src/terminal/command-framing.middleware.ts')
@@ -80,6 +81,41 @@ async function fixture () {
 }
 
 async function main () {
+    await load('tabby-ai/src/terminal/shell-integration.spec.ts').runTests(test)
+    await load('tabby-ai/src/terminal/session-capture.middleware.spec.ts').runTests(test, defaults)
+    await test('Docker progress and carriage-return downloads repaint one row without terminal control injection', async () => {
+        for (const source of [
+            'before\n' + Array.from({length: 100}, (_, i) => `abcdef123456 Downloading ${i}MB\n`).join('') + 'done\n',
+            'before\n10%\r20%\r100%\r\ndone\n',
+        ]) {
+            const frontend = new XTermFrontend(), output = new CommandOutputPresentation()
+            let rendered = ''
+            for (const character of source) rendered += output.feed(character, 40)
+            rendered += output.finish()
+            await new Promise(resolve => frontend.xterm.write(rendered, resolve))
+            const screen = Array.from({length: frontend.xterm.buffer.active.length}, (_, i) => frontend.xterm.buffer.active.getLine(i).translateToString(true)).filter(Boolean)
+            assert.equal(screen.length, 3, screen.join('\n'))
+            assert.equal(screen[0], 'before')
+            assert.equal(screen[2], 'done')
+            assert.match(screen[1], /99MB|100%/)
+            frontend.xterm.dispose()
+        }
+        const output = new CommandOutputPresentation()
+        let text = ''
+        for (const part of ['safe\x1b]52;c;', 'private\x07\x1b[2J\n']) text += output.feed(part)
+        assert.equal(text + output.finish(), 'safe\r\n')
+        const normal = new CommandOutputPresentation()
+        const longLine = 'ordinary log '.repeat(100)
+        assert.equal(normal.feed(longLine + '\r') + normal.feed('\n') + normal.finish(), longLine + '\r\n')
+    })
+    await test('redaction streams carriage-return progress without waiting for the download to end', () => {
+        const redactor = new SecretRedactor({ knownSecrets: new Set(), config: defaults })
+        const scope = redactor.createScope(), filter = scope.streamFilter(true)
+        const placeholder = scope.register('test-password')
+        assert.equal(filter('10%\r'), '10%\r')
+        assert.equal(filter('password=test-password\r'), `password=${placeholder}\r`)
+        assert.equal(filter('100%\r\n') + filter.flush(), '100%\r\n')
+    })
     await load('tabby-ai/src/terminal/ssh-exec.spec.ts').runTests(test)
     await test('shell bootstrap normalizes Windows script line endings before encoding', () => {
         for (const kind of ['bash', 'zsh', 'fish', 'powershell']) {
@@ -138,6 +174,7 @@ async function main () {
     await load('tabby-ai/src/session/ai-session.service.spec.ts').runTests(test)
     await load('tabby-ai/src/policy/credential-guard.spec.ts').runTests(test, defaults)
     await load('tabby-ai/src/policy/execution-boundary.spec.ts').runTests(test, defaults)
+    await load('tabby-ai/src/policy/command-results.spec.ts').runTests(test, defaults)
     await load('tabby-ai/src/terminal/ai-input.middleware.spec.ts').runTests(test, fixture)
     await test('terminal color and capability replies do not end Fish bootstrap while its startup screen probe is active', async () => {
         const f = await fixture()
@@ -161,14 +198,17 @@ async function main () {
                 const config = { config: { ...defaults, policy: { ...defaults.policy, approvalMode: mode, autoApprove: [], requireApproval: [], requireSecondApproval: [], deny: [], commandRules: [{ command: 'pwd', risk }] } } }
                 const events = [], approvals = [], executions = []
                 const runtime = { id: 'permissions', tab: {}, state: new BehaviorSubject('THINKING'), events: new BehaviorSubject([]) }
-                const run = { id: 'run', controller: new AbortController(), stopRequested: false, sensitive: new SecretRedactor(config).createScope() }
+                const run = { id: 'run', controller: new AbortController(), stopRequested: false, sensitive: new SecretRedactor({ ...config, knownSecrets: new Set() }).createScope() }
                 const agent = new AgentService(config, null, null, new CommandPolicyService(config), null,
                     { append: async (_runtime, type, data) => events.push({ type, data }) },
-                    { request: async request => { approvals.push(request); return { approved: true, command: request.command } } },
+                    { request: async request => { approvals.push(request); return { approved: true, command: request.command } },
+                        requestForm: async request => ({ submitted: true, value: request.content }) },
                     null, { execute: async (_runtime, command) => { executions.push(command); return { output: 'test', exitCode: 0 } } },
                     { interrupt: async () => {}, open: async () => {} }, new AgentPermissionsService(config, null))
                 assert.equal(approvalAction(risk, mode), expected[index])
-                await agent.executeTool(runtime, run, { function: { name: 'terminal_exec', arguments: JSON.stringify({ command: 'pwd', reason: 'Test' }) } })
+                const operation = agent.executeTool(runtime, run, { function: { name: 'terminal_exec', arguments: JSON.stringify({ command: 'pwd', reason: 'Test' }) } })
+                if (expected[index] === 'deny') await assert.rejects(operation, /禁止/)
+                else await operation
                 assert.equal(executions.length, expected[index] === 'deny' ? 0 : 1, mode + ':' + risk)
                 assert.equal(approvals.length, expected[index] === 'ask' ? 1 : 0)
                 if (approvals.length) assert.equal(approvals[0].confirmationsRequired, risk === 'DANGEROUS' ? 2 : 1)
@@ -210,7 +250,7 @@ async function main () {
     })
     await test('disabling an optional redaction rule retains local secret placeholders', () => {
         const config = { config: { ...defaults, redaction: { enabled: true, patterns: [{ name: 'custom', pattern: 'private-value', replacement: '[CUSTOM]', enabled: false }] } } }
-        const redactor = new SecretRedactor(config)
+        const redactor = new SecretRedactor({ ...config, knownSecrets: new Set() })
         assert.equal(redactor.redact('private-value'), 'private-value')
         config.config.redaction.patterns[0].enabled = true
         assert.equal(redactor.redact('private-value'), '[CUSTOM]')
@@ -245,10 +285,13 @@ async function main () {
             { type: 'ssh-output', data: { content: '\x1b]52;c;PRIVATE' } },
             { type: 'ssh-output', data: { content: '\x07/home/test\r\n\x1b[2J' } },
             { type: 'ai-message', data: { content: '**完成**' } },
+            { type: 'error', data: { command: 'cat /tmp/.env', message: '凭证保护：禁止读取', source: 'policy-feedback' } },
         ])].join('')
         assert.match(restored, /检查目录/)
         assert.match(restored, /\$ pwd/)
         assert.match(restored, /\/home\/test/)
+        assert.match(restored, /未执行命令：\r\n\$ cat \/tmp\/\.env/)
+        assert.match(restored, /凭证保护：禁止读取/)
         assert.equal(restored.includes('PRIVATE'), false)
         assert.equal(restored.replace(/\x1b\[[\d;]*m/g, '').includes('\x1b'), false)
     })
@@ -319,7 +362,8 @@ async function main () {
     })
     await test('multiline shell, continuations, heredocs and mixed prose', () => {
         for (const source of ['ls\npwd', '# comment\nls', 'curl \\\n  https://example.com', "cat <<'EOF'\n这里是内容\nEOF", 'for x in a b; do\n echo "$x"\ndone', 'echo "hello\n世界"', '```bash\nls\npwd\n```']) assert.equal(detector.isShellCommand(source), true, source)
-        for (const source of ['帮我检查磁盘', 'ls\n然后解释结果', '检查这个地址 https://example.com?a=b&c=d']) assert.equal(detector.isShellCommand(source), false, source)
+        for (const source of ['帮我检查磁盘', 'ls\n然后解释结果', '检查这个地址 https://example.com?a=b&c=d', '现在用的是gitea', '你在干什么？']) assert.equal(detector.isShellCommand(source), false, source)
+        for (const source of ['ps aux | grep -i gitea | grep -v grep | head -10', 'systemctl list-units --type=service | grep -i gitea | head -5', 'docker ps | grep -i gitea | head -5 2>/dev/null || echo "无docker进程"']) assert.equal(detector.isShellCommand(source), true, source)
         assert.equal(unwrapShellFence('```bash\nls\n```'), 'ls')
     })
     await test('split ANSI/OSC/DCS and C1 model controls never reach xterm', () => {
@@ -429,7 +473,7 @@ async function main () {
         framing.close()
     })
     await test('known secrets never leak across any streaming chunk boundary', () => {
-        const redactor = new SecretRedactor({ config: defaults })
+        const redactor = new SecretRedactor({ knownSecrets: new Set(), config: defaults })
         for (const secret of ['sample-secret-123', 'aaaa', 'abcabc', '中文密码']) {
             const scope = redactor.createScope(), placeholder = scope.register(secret)
             for (let split = 1; split < secret.length; split++) {
@@ -503,6 +547,23 @@ async function main () {
             assert.equal(f.integration.state.value, 'initializing')
         } finally { f.close() }
     })
+    await test('Shell mode keeps CWD reports for SFTP while input passes directly to the PTY', async () => {
+        const f = await fixture(), integrationWrites = []
+        f.integration.outputToSession$.subscribe(data => integrationWrites.push(data.toString()))
+        try {
+            f.integration.disable(true)
+            assert.equal(f.input.canCapture, false)
+            assert.equal(f.integration.installed, true)
+            await f.type('cd /tmp\r')
+            assert.deepEqual(f.sent, ['cd /tmp\r'])
+            f.integration.feedFromSession(Buffer.from(f.marker('PWD;' + Buffer.from('/tmp').toString('base64'))))
+            await f.prompt()
+            assert.equal(f.integration.workingDirectory, '/tmp')
+            f.integration.enable()
+            assert.equal(f.input.canCapture, true)
+            assert.deepEqual(integrationWrites, [], 'Mode switching must not type uninstall/bootstrap commands')
+        } finally { f.close() }
+    })
     await test('presenter drains its last batch before handoff and releases failed presentations', async () => {
         const { AgentTerminalPresenter } = load('tabby-ai/src/terminal/agent-terminal-presenter.ts')
         const f = await fixture()
@@ -517,6 +578,48 @@ async function main () {
             fail = true
             await assert.rejects(presenter.finish('one'))
             assert.equal(presenter.runs.size, 0)
+        } finally { presenter.detachSession(f.runtime.id); f.close() }
+    })
+    await test('independent exec output renders once in xterm, strips split controls and never writes to SSH', async () => {
+        const { AgentTerminalPresenter } = load('tabby-ai/src/terminal/agent-terminal-presenter.ts')
+        const f = await fixture()
+        f.runtime.independentExecution = true
+        let executing = true
+        const presenter = new AgentTerminalPresenter({ waitForPrompt: async () => {}, isExecuting: () => executing, canPresent: () => true, setLocalPresentation: () => {} })
+        try {
+            await presenter.open(f.runtime, 'inline')
+            f.runtime.events.next([{ seq: 1, runId: 'inline', type: 'ssh-output', data: { source: 'ai', content: 'ONCE\x1b]52;c;FORBIDDEN' } }])
+            f.runtime.events.next([{ seq: 2, runId: 'inline', type: 'ssh-output', data: { source: 'ai', content: '\x07\nDONE\n' } }])
+            await new Promise(resolve => setTimeout(resolve, 80))
+            const visible = () => Array.from({length: f.frontend.xterm.buffer.active.length}, (_, i) => f.frontend.xterm.buffer.active.getLine(i).translateToString()).join('\n')
+            assert.match(visible(), /ONCE\s+DONE/)
+            assert.equal(visible().includes('FORBIDDEN'), false)
+            executing = false
+            await presenter.finish('inline')
+            assert.equal(visible().split('ONCE').length, 2)
+            assert.deepEqual(f.sent, [])
+        } finally { presenter.detachSession(f.runtime.id); f.close() }
+    })
+    await test('finishing an Agent while the user edits does not wait for or erase their prompt', async () => {
+        const { AgentTerminalPresenter } = load('tabby-ai/src/terminal/agent-terminal-presenter.ts')
+        const f = await fixture()
+        f.runtime.independentExecution = true
+        let ready = true
+        const presenter = new AgentTerminalPresenter({ waitForPrompt: async () => { if (!ready) throw new Error('must not wait') },
+            canPresent: () => ready, restorePrompt: async () => {}, isExecuting: () => false, setLocalPresentation: () => {} })
+        try {
+            await presenter.open(f.runtime, 'defer')
+            await presenter.interrupt('defer')
+            ready = false
+            f.runtime.events.next([{ seq: 1, runId: 'defer', type: 'ssh-output', data: { source: 'ai', content: 'AFTER_USER_COMMAND\n' } }])
+            await presenter.finish('defer')
+            assert.equal(presenter.hasDeferred(f.runtime.id), true)
+            ready = true
+            f.runtime.terminal.next({ ...f.runtime.terminal.value })
+            await tick()
+            await f.runtime.tab.write('')
+            assert.equal(presenter.hasDeferred(f.runtime.id), false)
+            assert.deepEqual(f.sent, [])
         } finally { presenter.detachSession(f.runtime.id); f.close() }
     })
     console.log(count + ' native Agent checks passed')

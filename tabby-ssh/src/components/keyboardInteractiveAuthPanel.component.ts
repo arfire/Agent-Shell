@@ -25,6 +25,8 @@ export class KeyboardInteractiveAuthComponent implements OnInit {
     @Output() done = new EventEmitter()
     @ViewChild('input') input: ElementRef
     remember = false
+    saving = false
+    passwordError = ''
 
     constructor (
         private passwordStorage: PasswordStorageService,
@@ -33,7 +35,7 @@ export class KeyboardInteractiveAuthComponent implements OnInit {
     ) {}
 
     async ngOnInit (): Promise<void> {
-        const savedPassword = await this.passwordStorage.loadPassword(this.profile)
+        const savedPassword = await this.passwordStorage.loadPassword(this.profile).catch(() => null)
         if (savedPassword) {
             for (let i = 0; i < this.prompt.prompts.length; i++) {
                 if (this.prompt.isAPasswordPrompt(i) && !this.prompt.responses[i]) {
@@ -105,9 +107,17 @@ export class KeyboardInteractiveAuthComponent implements OnInit {
         this.input.nativeElement.focus()
     }
 
-    next (): void {
+    async next (): Promise<void> {
+        if (this.saving) { return }
         if (this.isPassword() && this.remember) {
-            this.passwordStorage.savePassword(this.profile, this.prompt.responses[this.step])
+            this.saving = true
+            try {
+                await this.passwordStorage.savePassword(this.profile, this.prompt.responses[this.step])
+                this.passwordError = ''
+            } catch {
+                this.passwordError = '密码未保存。请重试，或取消记住密码后继续。'
+                return
+            } finally { this.saving = false; this.cdr.markForCheck() }
         }
 
         if (this.step === this.prompt.prompts.length - 1) {

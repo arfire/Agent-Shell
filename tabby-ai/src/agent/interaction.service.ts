@@ -20,6 +20,7 @@ export interface ApprovalRequest extends InteractionOwner {
     command: string
     reason: string
     risk: CommandRisk
+    riskDescription?: string
     confirmationsRequired: number
 }
 

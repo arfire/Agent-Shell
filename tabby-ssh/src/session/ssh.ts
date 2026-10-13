@@ -480,7 +480,7 @@ export class SSHSession {
             this.ssh = authenticatedClient
         } else {
             this.ssh.disconnect()
-            this.passwordStorage.deletePassword(this.profile, this.authUsername ?? undefined)
+            await this.passwordStorage.deletePassword(this.profile, this.authUsername ?? undefined).catch(() => undefined)
             // eslint-disable-next-line @typescript-eslint/no-base-to-string
             throw new Error('Authentication rejected')
         }
@@ -488,7 +488,9 @@ export class SSHSession {
         // auth success
 
         if (this.savedPassword) {
-            this.passwordStorage.savePassword(this.profile, this.savedPassword, this.authUsername ?? undefined)
+            await this.passwordStorage.savePassword(this.profile, this.savedPassword, this.authUsername ?? undefined).catch(() => {
+                this.emitServiceMessage('密码未保存到保险库，本次连接仍可使用。')
+            })
         }
 
         for (const fw of this.profile.options.forwardedPorts) {
@@ -1016,7 +1018,9 @@ export class SSHSession {
 
                     passphrase = result?.value
                     if (passphrase && result.remember) {
-                        this.passwordStorage.savePrivateKeyPassword(keyHash, passphrase)
+                        await this.passwordStorage.savePrivateKeyPassword(keyHash, passphrase).catch(() => {
+                            this.emitServiceMessage('私钥口令未保存到保险库，本次连接仍可使用。')
+                        })
                     }
                 } else {
                     this.notifications.error('Could not read the private key', e.toString())

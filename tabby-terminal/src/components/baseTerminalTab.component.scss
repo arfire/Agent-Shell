@@ -4,6 +4,7 @@
     flex-direction: column;
     // overflow: hidden;
     position: relative;
+    padding-right: var(--ash-context-width, 0px);
 
     &> .content {
         flex: auto;
@@ -27,7 +28,7 @@
         position: absolute;
         top: 0;
         left: 0;
-        right: 0;
+        right: var(--ash-context-width, 0px);
         z-index: 4;
 
         opacity: 0;
@@ -47,7 +48,7 @@
 
     > .toolbar-pin-button {
         position: absolute;
-        right: 34px;
+        right: calc(34px + var(--ash-context-width, 0px));
         top: 5px;
         z-index: 4;
         background: #00000047;

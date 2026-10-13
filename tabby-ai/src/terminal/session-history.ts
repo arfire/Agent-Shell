@@ -18,6 +18,8 @@ export function * historyChunks (events: SessionEvent[], output = new TerminalHi
         } else if (event.type === 'ai-message') {
             yield '\r\n\x1b[36mAgent\x1b[0m\r\n' + terminalMarkdown(String(data.content ?? '')) + '\r\n'
         } else if (event.type === 'ssh-input') {
+            if (data.reason) { yield '\r\n' + terminalText(String(data.reason)) + '\r\n' }
+            if (data.riskDescription) { yield '注意：' + terminalText(String(data.riskDescription)) + '\r\n' }
             const command = String(data.content ?? '').trim()
             if (command) { yield '\r\n$ ' + terminalText(command) + '\r\n' }
         } else if (event.type === 'command-result') {
@@ -25,7 +27,8 @@ export function * historyChunks (events: SessionEvent[], output = new TerminalHi
         } else if (event.type === 'web-activity') {
             yield '\r\n联网: ' + terminalText(String(data.content ?? '')) + '\r\n'
         } else if (event.type === 'error') {
-            yield '\r\nAgent: ' + terminalText(String(data.message ?? '')) + '\r\n'
+            yield '\r\n' + (data.command ? '未执行命令：\r\n$ ' + terminalText(String(data.command)) + '\r\n' : '') +
+                'Agent: ' + terminalText(String(data.message ?? '')) + '\r\n'
         }
     }
     if (finish) { yield output.flush() }

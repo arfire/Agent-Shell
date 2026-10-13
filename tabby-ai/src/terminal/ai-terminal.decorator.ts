@@ -8,6 +8,7 @@ import { AISessionCaptureMiddleware } from './session-capture.middleware'
 import { TerminalControllerService } from './terminal-controller.service'
 import { AgentTerminalPresenter } from '../terminal/agent-terminal-presenter'
 import { SecretRedactor } from '../policy/secret-redactor'
+import { AIInputMiddleware } from './ai-input.middleware'
 import { AgentDockService } from '../ui/agent-dock.service'
 
 @Injectable()
@@ -78,8 +79,8 @@ export class AITerminalDecorator extends TerminalDecorator {
     }
 
     private getRequestHandler (runtime: Awaited<ReturnType<AISessionService['attach']>>) {
-        return (input: string) => {
-            void this.agent.start(runtime, input)
+        return (input: string, middleware: AIInputMiddleware) => {
+            void this.agent.start(runtime, input, middleware)
         }
     }
 }

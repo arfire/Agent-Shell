@@ -15,18 +15,19 @@ import { AgentInteractionService } from './interaction.service'
 import { AgentRunQueue } from './run-queue'
 import { AgentPermissionsService, approvalAction, CommandAuthorization, permissionInstructions } from '../policy/agent-permissions.service'
 import { credentialAccessReason } from '../policy/credential-guard'
+import { commandRiskDescription } from '../policy/command-description'
 import { WebService, WebRunState } from '../web/web.service'
 
 const TERMINAL_TOOLS: ChatTool[] = [{
     type: 'function',
     'function': {
         name: 'terminal_exec',
-        description: 'Execute a noninteractive command in a fresh process on the current SSH connection (no PTY, stdin closed, 120-second timeout). Return output and exit code. Use absolute paths; cd/export do not persist between calls. Never start pagers or interactive editors.',
+        description: 'Execute a noninteractive command in a fresh process on the current SSH connection (no PTY, stdin closed). Output activity renews a 10-minute idle timeout; active downloads have no fixed total limit. Return output and exit code. Use absolute paths; cd/export do not persist between calls. Never start pagers or interactive editors.',
         parameters: {
             type: 'object',
             properties: {
                 command: { type: 'string', description: 'A command for the current shell. Format long combined commands over multiple lines with readable indentation and shell-safe continuations.' },
-                reason: { type: 'string', description: 'A concise user-facing reason for running this command.' },
+                reason: { type: 'string', description: 'Briefly explain the command effect in the user language. Mention concrete risks such as deletion, overwrite, interruption or permission changes. Do not add unrelated actions.' },
             },
             required: ['command', 'reason'],
             additionalProperties: false,
@@ -47,6 +48,16 @@ const TERMINAL_TOOLS: ChatTool[] = [{
             additionalProperties: false,
         },
     },
+}, {
+    type: 'function',
+    'function': {
+        name: 'generate_secret',
+        description: 'In unrestricted mode, generate a random password without saving it to the vault. Use it for the task and tell the user the password and how to change it when finished. In other modes use request_user_input(kind="secret").',
+        parameters: {
+            type: 'object', properties: { description: { type: 'string', description: 'Short credential name, including the service it belongs to.' } },
+            required: ['description'], additionalProperties: false,
+        },
+    },
 }]
 
 interface ActiveRun {
@@ -59,9 +70,13 @@ interface ActiveRun {
     web?: WebRunState
     containsSensitiveContext?: boolean
     executingAuthorization?: CommandAuthorization
+    interruptedExecution?: boolean
 }
 
 class UserRejectedError extends Error { }
+class CommandBlockedError extends Error {
+    constructor (message: string, public readonly command: string) { super(message) }
+}
 
 function isHigherRisk (next: CommandPolicyDecision, previous: CommandPolicyDecision): boolean {
     const weight = { SAFE: 0, MODIFY: 1, DANGEROUS: 2, DENY: 3 }
@@ -148,13 +163,18 @@ export class AgentService {
             const cancelled = run.stopRequested || error instanceof UserRejectedError || error instanceof DOMException && error.name === 'AbortError'
             const state = cancelled ? 'CANCELLED' : 'FAILED'
             runtime.state.next(state)
+            if (error instanceof UserRejectedError && !run.stopRequested) {
+                await this.sessions.append(runtime, 'error', { message: getErrorMessage(error), source: 'local-stop' }, run.id)
+            }
             await this.sessions.append(runtime, cancelled ? 'agent-state' : 'error', cancelled
-                ? { state, reason: getErrorMessage(error) }
+                ? { state, reason: getErrorMessage(error), message: run.stopRequested
+                    ? run.interruptedExecution ? '已手动停止 Agent，终端可以继续操作。上方保留最后进度；执行通道已关闭，远端任务是否结束仍需核实。'
+                        : '已手动停止 Agent，终端可以继续操作。' : undefined }
                 : { message: getErrorMessage(error) }, run.id)
         } finally {
             try {
                 await this.presenter.finish(run.id)
-                if (runtime.tab.session === run.session) {
+                if (runtime.tab.session === run.session && !this.presenter.hasDeferred(runtime.id)) {
                     await this.terminal.restorePrompt(runtime)
                 }
             } catch (error) {
@@ -167,13 +187,17 @@ export class AgentService {
             runtime.stopAgent = undefined
             runtime.handoffAgent = undefined
             runtime.liveText.next('')
+            run.sensitive.clear()
             // Reset the shadow readline state and enqueue the fresh prompt
             // before accepting another xterm/IME commit. Otherwise a very
             // quick next input can race the previous run's cleanup.
-            inputMiddleware?.resetInputBuffer()
+            if (!run.stopRequested) { inputMiddleware?.resetInputBuffer() }
             runtime.locked = false
             runtime.terminal.next({ ...runtime.terminal.value, ready: inputMiddleware?.canCapture ?? runtime.terminal.value.ready })
-            runtime.tab.frontend?.focus()
+            // Return to the native input unless the user is reviewing model context.
+            if (inputMiddleware && !runtime.tab.content?.nativeElement.ownerDocument.activeElement?.closest('.context-panel')) {
+                runtime.tab.frontend?.focus()
+            }
             complete()
         }
     }
@@ -184,18 +208,23 @@ export class AgentService {
             return
         }
         run.stopRequested = true
+        run.interruptedExecution = this.terminal.isExecuting(runtime)
+        runtime.locked = false
         this.interactions.cancelRun(run.id)
         run.controller.abort(new DOMException('Agent stopped', 'AbortError'))
     }
 
     private async runLoop (runtime: AISessionRuntime, run: ActiveRun, input: string): Promise<void> {
         const webTools = this.web?.tools(input) ?? []
-        run.web = { input, calls: 0, remainingChars: Math.min(32000, this.config.config.agent.maxContextTokens) }
+        run.web = { input, calls: 0, remainingChars: Math.min(32000, this.config.config.agent.maxContextTokens),
+            onRequest: (body, model) => this.recordRequest(runtime, run, body, model, '联网模型'),
+        }
         let messages = this.context.build(
             runtime,
             input,
             Math.floor(this.config.config.agent.maxContextTokens * (webTools.length ? 0.75 : 1)),
             content => run.sensitive.protect(content),
+            this.permissions.mode(runtime) === 'unrestricted',
         )
         for (let step = 0; step < 50; step++) {
             if (run.stopRequested) {
@@ -211,12 +240,15 @@ export class AgentService {
             runtime.state.next('THINKING')
             runtime.liveText.next('')
             const textFilter = run.sensitive.streamFilter()
-            const result = await this.client.stream([permissionMessage, ...messages], [...TERMINAL_TOOLS, ...this.web?.tools(input) ?? []], {
+            const tools = TERMINAL_TOOLS.filter(tool => mode === 'unrestricted' || tool.function.name !== 'generate_secret')
+            const result = await this.client.stream([permissionMessage, ...messages], [...tools, ...this.web?.tools(input) ?? []], {
+                onRequest: (body, model) => this.recordRequest(runtime, run, body, model, 'Agent'),
                 onText: text => runtime.liveText.next(runtime.liveText.value + textFilter(text)),
             }, run.controller.signal)
             runtime.liveText.next(runtime.liveText.value + textFilter.flush())
             if (result.content) {
-                await this.sessions.append(runtime, 'ai-message', { content: result.content }, run.id)
+                await this.sessions.append(runtime, 'ai-message', { content: result.content,
+                    localOnly: !!run.containsSensitiveContext || mode === 'unrestricted' }, run.id)
             }
             runtime.liveText.next('')
             messages.push({
@@ -227,8 +259,20 @@ export class AgentService {
             if (!result.toolCalls.length) {
                 return
             }
+            let blocked = false
             for (const toolCall of result.toolCalls) {
-                const toolResult = await this.executeTool(runtime, run, toolCall)
+                let toolResult = JSON.stringify({ executed: false, error: '上一项命令未执行，请根据其反馈重新决定后续步骤。' })
+                if (!blocked) {
+                    try { toolResult = await this.executeTool(runtime, run, toolCall) } catch (error) {
+                        if (!(error instanceof CommandBlockedError)) { throw error }
+                        blocked = true
+                        const reason = run.sensitive.protect(error.message)
+                        const command = run.sensitive.protect(error.command)
+                        toolResult = JSON.stringify({ executed: false, command, error: reason,
+                            next: '记住这次反馈，按当前权限继续原任务。写法不支持时可提交可检查的等效命令；缺少密码时调用 request_user_input(kind="secret")，复用本任务已提供的占位符。禁止的操作不得换工具绕过。需要用户选择时简述可行方案、差异和推荐项，通过现有表单询问。' })
+                        await this.sessions.append(runtime, 'error', { command, message: '本条命令未执行，已将原因反馈给模型：' + reason, source: 'policy-feedback' }, run.id)
+                    }
+                }
                 messages.push({
                     role: 'tool',
                     tool_call_id: toolCall.id,
@@ -242,6 +286,13 @@ export class AgentService {
 
     private async executeTool (runtime: AISessionRuntime, run: ActiveRun, toolCall: ToolCall): Promise<string> {
         if (this.isStopped(run)) { throw new DOMException('Agent stopped', 'AbortError') }
+        if (toolCall.function.name === 'generate_secret') {
+            if (this.permissions.mode(runtime) !== 'unrestricted') {
+                return JSON.stringify({ error: '请调用 request_user_input(kind="secret") 索取本次需要的密码，复用已有占位符；不要要求用户解锁保险库。' })
+            }
+            run.containsSensitiveContext = true
+            return JSON.stringify({ value: crypto.randomBytes(32).toString('hex'), sensitive: true, saved: false })
+        }
         if (['web_search', 'web_fetch'].includes(toolCall.function.name)) {
             if (!this.web || !run.web) { return JSON.stringify({ error: '联网搜索未启用' }) }
             return this.web.execute(toolCall, run.web, run.controller.signal, content => run.sensitive.protect(content), async event => {
@@ -266,8 +317,7 @@ export class AgentService {
         }
         const credentialError = credentialAccessReason(argumentsValue.command, this.permissions.mode(runtime))
         if (credentialError) {
-            await this.sessions.append(runtime, 'error', { message: credentialError, source: 'credential-guard' }, run.id)
-            return JSON.stringify({ error: credentialError })
+            throw new CommandBlockedError('凭证保护：' + credentialError, argumentsValue.command)
         }
         let command = run.sensitive.protect(argumentsValue.command.trim())
         if (!command) { return JSON.stringify({ error: 'Command must not be empty' }) }
@@ -275,11 +325,12 @@ export class AgentService {
         const authorization = this.permissions.snapshot(runtime)
         let decision = this.policy.evaluate(command, runtime.shellKind, authorization.policy)
         let approvedCommand: string|undefined = undefined
-        await this.sessions.append(runtime, 'ai-command', { command, reason, risk: decision.risk, permissionMode: authorization.mode }, run.id)
+        await this.sessions.append(runtime, 'ai-command', { command, reason, risk: decision.risk,
+            riskDescription: commandRiskDescription(command, decision.risk), permissionMode: authorization.mode }, run.id)
 
         const action = approvalAction(decision.risk, authorization.mode)
         if (action === 'deny') {
-            return JSON.stringify({ error: 'Command denied by local policy', reason: decision.reason })
+            throw new CommandBlockedError('本地规则禁止此命令：' + decision.reason + (decision.matchedRule ? ' 匹配规则：' + decision.matchedRule : ''), command)
         }
         if (action === 'ask') {
             runtime.state.next('WAITING_APPROVAL')
@@ -288,13 +339,14 @@ export class AgentService {
                 connectionId: runtime.connectionId,
                 runId: run.id,
                 command,
-                reason: `${reason}\nPolicy: ${decision.reason}`,
+                reason,
+                riskDescription: commandRiskDescription(command, decision.risk),
                 risk: decision.risk,
                 confirmationsRequired: decision.risk === 'DANGEROUS' ? 2 : 1,
             })
             if (response.approved) {
                 const editedError = credentialAccessReason(response.command, this.permissions.mode(runtime))
-                if (editedError) { return JSON.stringify({ error: editedError }) }
+                if (editedError) { throw new CommandBlockedError('修改后的命令触发凭证保护：' + editedError, response.command) }
             }
             const protectedEditedCommand = run.sensitive.protect(response.command.trim())
             await this.sessions.append(runtime, 'approval', {
@@ -304,7 +356,7 @@ export class AgentService {
                 permissionMode: authorization.mode,
             }, run.id)
             if (!response.approved) {
-                return JSON.stringify({ status: 'rejected', executed: false, message: '用户拒绝了这条命令。请继续分析并说明可行的下一步，不要改写或换工具重试被拒绝的操作。' })
+                throw new UserRejectedError('你已拒绝命令，未执行，本轮已结束。')
             }
             const originalDecision = decision
             command = protectedEditedCommand
@@ -333,20 +385,21 @@ export class AgentService {
         authorization: CommandAuthorization,
     ): Promise<string> {
         if (decision.risk === 'DENY') {
-            return JSON.stringify({ error: 'Edited command denied by local policy', reason: decision.reason })
+            throw new CommandBlockedError('本地规则禁止修改后的命令：' + decision.reason + (decision.matchedRule ? ' 匹配规则：' + decision.matchedRule : ''), command)
         }
         const response = await this.interactions.request({
             sessionId: runtime.id,
             connectionId: runtime.connectionId,
             runId: run.id,
             command,
-            reason: `Edited command was reclassified: ${decision.reason}`,
+            reason: '修改后的命令需要重新确认。' + reason,
+            riskDescription: commandRiskDescription(command, decision.risk),
             risk: decision.risk,
             confirmationsRequired: decision.risk === 'DANGEROUS' ? 2 : 1,
         })
         if (response.approved) {
             const editedError = credentialAccessReason(response.command, this.permissions.mode(runtime))
-            if (editedError) { return JSON.stringify({ error: editedError }) }
+            if (editedError) { throw new CommandBlockedError('修改后的命令触发凭证保护：' + editedError, response.command) }
         }
         const protectedEditedCommand = run.sensitive.protect(response.command.trim())
         await this.sessions.append(runtime, 'approval', {
@@ -358,7 +411,7 @@ export class AgentService {
             risk: decision.risk,
         }, run.id)
         if (!response.approved) {
-            return JSON.stringify({ status: 'rejected', executed: false, message: '用户拒绝了修改后的命令。请继续分析，不要重试被拒绝的操作。' })
+            throw new UserRejectedError('你已拒绝修改后的命令，未执行，本轮已结束。')
         }
         if (!protectedEditedCommand) { return JSON.stringify({ error: 'Command must not be empty' }) }
         const finalDecision = this.policy.evaluate(protectedEditedCommand, runtime.shellKind, authorization.policy)
@@ -379,10 +432,10 @@ export class AgentService {
     ): Promise<string> {
         const mode = this.permissions.mode(runtime)
         if (mode !== authorization.mode) {
-            return JSON.stringify({ error: '执行权限已变化，请按当前权限重新提交命令' })
+            throw new CommandBlockedError('执行权限已变化，命令未执行。请按新权限重新提交所需命令进行检查。', command)
         }
         const credentialError = credentialAccessReason(command, mode)
-        if (credentialError) { return JSON.stringify({ error: credentialError }) }
+        if (credentialError) { throw new CommandBlockedError('凭证保护：' + credentialError, command) }
         if (this.isStopped(run) || runtime.tab.session !== run.session) {
             throw new DOMException('Agent stopped before command execution', 'AbortError')
         }
@@ -390,35 +443,42 @@ export class AgentService {
         const current = this.policy.evaluate(command, runtime.shellKind)
         if (isHigherRisk(rechecked, decision)) { decision = rechecked }
         if (mode !== 'unrestricted' && isHigherRisk(current, decision)) {
-            return JSON.stringify({ error: '执行规则已收紧，请重新提交命令审批' })
+            throw new CommandBlockedError('执行规则已收紧，命令未执行：' + current.reason + (current.matchedRule ? ' 匹配规则：' + current.matchedRule : ''), command)
         }
         const action = approvalAction(decision.risk, authorization.mode)
         if (action === 'deny') {
-            return JSON.stringify({ error: 'Command denied by local policy', reason: decision.reason })
+            throw new CommandBlockedError('本地规则禁止此命令：' + decision.reason + (decision.matchedRule ? ' 匹配规则：' + decision.matchedRule : ''), command)
         }
         if (action === 'ask' && approvedCommand !== command) {
-            return JSON.stringify({ error: '本条命令尚未获得用户审批，不能执行' })
+            throw new CommandBlockedError('本条命令尚未获得审批，请通过 terminal_exec 重新提交，等待当前权限要求的审批。', command)
         }
         runtime.state.next('EXECUTING')
-        await this.sessions.append(runtime, 'ssh-input', { content: command, source: 'ai', reason }, run.id)
-        await this.presenter.interrupt(run.id)
+        await this.sessions.append(runtime, 'ssh-input', { content: command, source: 'ai', reason,
+            riskDescription: commandRiskDescription(command, decision.risk, mode === 'unrestricted') }, run.id)
+        if (!runtime.independentExecution) { await this.presenter.interrupt(run.id) }
         try {
             run.executingAuthorization = authorization
             let executableCommand = ''
             try { executableCommand = run.sensitive.restoreCommand(command, runtime.shellKind) } catch (error) {
-                return JSON.stringify({ error: getErrorMessage(error) })
+                throw new CommandBlockedError(getErrorMessage(error), command)
             }
             const result = await this.terminal.execute(runtime, executableCommand, (prompt, kind) =>
                 this.handleInteractivePrompt(runtime, run, prompt, kind), run.controller.signal,
             run.sensitive.streamFilter(true), () => {
-                if (this.permissions.mode(runtime) !== mode) { throw new Error('执行权限已变化，命令未执行') }
+                if (this.permissions.mode(runtime) !== mode) { throw new CommandBlockedError('执行权限已变化，命令未执行。请按新权限重新提交所需命令进行检查。', command) }
             })
             await this.sessions.append(runtime, 'command-result', { exitCode: result.exitCode, handedOff: run.stopRequested }, run.id)
             runtime.state.next('OBSERVING')
             if (run.stopRequested) {
                 throw new DOMException('Agent stopped after command completion', 'AbortError')
             }
-            return JSON.stringify({ exitCode: result.exitCode, output: result.output })
+            const output = run.sensitive.protect(result.output)
+            const unrestricted = this.permissions.mode(runtime) === 'unrestricted'
+            // Raw SSH history stays local. Only this protected result copy may be
+            // included in subsequent model context, including after a restart.
+            if (!unrestricted) { await this.sessions.append(runtime, 'model-output', { content: output, exitCode: result.exitCode }, run.id) }
+            if (unrestricted) { run.containsSensitiveContext = true }
+            return JSON.stringify({ exitCode: result.exitCode, output })
         } finally {
             run.executingAuthorization = undefined
             if (!run.stopRequested && !run.controller.signal.aborted) {
@@ -450,7 +510,8 @@ export class AgentService {
             throw new UserRejectedError('User cancelled the requested input')
         }
         if (argumentsValue.kind === 'secret') {
-            const placeholder = run.sensitive.register(form.value)
+            const value = form.value
+            const placeholder = run.sensitive.register(value)
             await this.sessions.append(runtime, 'interaction', {
                 prompt: argumentsValue.prompt,
                 kind: 'secret',
@@ -465,6 +526,14 @@ export class AgentService {
             response: value,
         }, run.id)
         return JSON.stringify({ value, sensitive: value !== form.value })
+    }
+
+    private recordRequest (runtime: AISessionRuntime, run: ActiveRun, body: string, model: string, source: string): void {
+        const requests = [...runtime.modelRequests ?? [], { sessionId: runtime.id, runId: run.id, source, model, body,
+            time: new Date().toLocaleTimeString('zh-CN', { hour12: false }) }].slice(-5)
+        while (requests.length > 1 && requests.reduce((sum, request) => sum + request.body.length, 0) > 2000000) { requests.shift() }
+        runtime.modelRequests = requests
+        runtime.state.next(runtime.state.value)
     }
 
     private async handleInteractivePrompt (
@@ -524,7 +593,8 @@ export class AgentService {
         if (!content) {
             return
         }
-        await this.sessions.append(runtime, 'ai-message', { content, partial: true }, run.id)
+        await this.sessions.append(runtime, 'ai-message', { content, partial: true,
+            localOnly: !!run.containsSensitiveContext || this.permissions.mode(runtime) === 'unrestricted' }, run.id)
         runtime.liveText.next('')
     }
 }

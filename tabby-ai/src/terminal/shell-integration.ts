@@ -66,7 +66,6 @@ export class ShellIntegration extends SessionMiddleware {
     private uninstallPending = false
     private uninstalling = false
     private enableAfterUninstall = false
-    private promptTimer?: ReturnType<typeof setTimeout>
     private promptPending = false
 
     constructor (private drain: () => Promise<void>) {
@@ -124,7 +123,6 @@ export class ShellIntegration extends SessionMiddleware {
     commandStarted (): void {
         this.ready = false
         this.promptPending = false
-        clearTimeout(this.promptTimer)
         this.generation++
         if (this.state.value !== 'remote') { this.state.next('remote') }
     }
@@ -183,9 +181,11 @@ export class ShellIntegration extends SessionMiddleware {
         await this.waitForPrompt()
     }
 
-    disable (): void {
+    disable (keepDirectoryTracking = false): void {
         clearTimeout(this.timer)
         this.mode.next('shell')
+        // Shell mode hands input to the PTY, but SFTP still needs prompt CWD reports.
+        if (keepDirectoryTracking && this.installed) { return }
         this.uninstallPending = this.installed || this.sentBootstrap
         if (this.ready && this.installed) {
             this.uninstall()
@@ -215,7 +215,8 @@ export class ShellIntegration extends SessionMiddleware {
 
     fail (message: string): void {
         clearTimeout(this.timer)
-        clearTimeout(this.promptTimer)
+        this.generation++
+        this.promptPending = false
         // Never inject cleanup into a running program or a partially edited remote line.
         // A late READY/B still triggers the pending cleanup after a failed bootstrap.
         const errors = this.hidden.split(/[\r\n]+/).filter(line => /syntax error|command not found|not found|error:/i.test(line))
@@ -234,7 +235,6 @@ export class ShellIntegration extends SessionMiddleware {
 
     close (): void {
         clearTimeout(this.timer)
-        clearTimeout(this.promptTimer)
         this.generation++
         this.ready = false
         this.state.next('closed')
@@ -295,6 +295,8 @@ export class ShellIntegration extends SessionMiddleware {
                 if (directory && !/[\x00-\x1f\x7f]/.test(directory)) { this.pendingDirectory = directory }
             }
         } else if (type === 'A') {
+            this.generation++
+            this.promptPending = false
             this.capturingPrompt = true
             this.promptText = ''
             this.ready = false
@@ -324,25 +326,23 @@ export class ShellIntegration extends SessionMiddleware {
     }
 
     private settlePrompt (): void {
-        clearTimeout(this.promptTimer)
         const generation = this.generation
-        // ConPTY can deliver the prompt's glyphs after its OSC marker. Drain a quiet batch.
-        this.promptTimer = setTimeout(() => {
-            void this.drain().then(() => {
-                if (generation !== this.generation || this.alternateScreen || !this.installed) { return }
-                this.promptPending = false
-                clearTimeout(this.timer)
-                this.ready = true
-                if (this.uninstallPending) {
-                    this.uninstall()
-                    return
-                }
-                this.workingDirectory = this.pendingDirectory
-                this.prompt.next()
-                this.state.next('prompt')
-                this.notice.next('')
-            }).catch(error => this.fail(String(error)))
-        }, 40)
+        // SSH preserves byte order: B follows the prompt text. Wait for xterm
+        // to parse those bytes, not a resettable quiet period on the network.
+        this.promptPending = false
+        void this.drain().then(() => {
+            if (generation !== this.generation || this.alternateScreen || !this.installed) { return }
+            clearTimeout(this.timer)
+            this.ready = true
+            if (this.uninstallPending) {
+                this.uninstall()
+                return
+            }
+            this.workingDirectory = this.pendingDirectory
+            this.prompt.next()
+            this.state.next('prompt')
+            this.notice.next('')
+        }).catch(error => this.fail(String(error)))
     }
 
     private uninstall (): void {

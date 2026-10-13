@@ -52,7 +52,7 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
     const baseURL = `http://127.0.0.1:${(server.address() as any).port}`
     const web = { ...defaultWebConfig(), mode: 'auto' as const, baseURL, authorization: 'Bearer search-secret' }
-    const config: any = { config: { web, llm: { ...web.model, model: 'main-model' }, redaction: { enabled: false, patterns: [] }, agent: { maxContextTokens: 32000 } } }
+    const config: any = { knownSecrets: new Set(), resolveSecret: async (value: string) => value, protectStoredCredentials: async () => undefined, config: { web, llm: { ...web.model, model: 'main-model' }, redaction: { enabled: false, patterns: [] }, agent: { maxContextTokens: 32000 } } }
     const client = new ChatCompletionsClient(config)
     const service = new WebService(config, client)
     const events: WebActivity[] = []

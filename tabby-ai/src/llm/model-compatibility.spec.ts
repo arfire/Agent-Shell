@@ -47,7 +47,7 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
     })
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
     const settings = { baseURL: `http://127.0.0.1:${(server.address() as any).port}/v1`, model: 'test', apiKey: 'secret-key', temperature: 0.2, timeout: 1000 }
-    const client = new ChatCompletionsClient({ config: { llm: settings } } as any)
+    const client = new ChatCompletionsClient({ knownSecrets: new Set(), resolveSecret: async (value: string) => value, protectStoredCredentials: async () => undefined, config: { llm: settings } } as any)
     const compatibility = new ModelCompatibilityService(client)
     const check = (): Promise<ModelCheck[]> => compatibility.check(settings, () => undefined, new AbortController().signal)
     try {

@@ -30,6 +30,7 @@ export interface ChatTool {
 }
 
 export interface StreamHandlers {
+    onRequest?: (body: string, model: string) => void
     onText?: (text: string) => void
     onToolCallDelta?: (toolCall: ToolCall) => void
 }
@@ -62,7 +63,9 @@ export class ChatCompletionsClient {
         signal?: AbortSignal,
         settings?: AIConfig['llm'],
     ): Promise<ChatCompletionResult> {
+        if (!settings) { await this.configService.protectStoredCredentials() }
         const config = settings ?? this.configService.config.llm
+        const apiKey = await this.configService.resolveSecret(config.apiKey)
         if (!config.model) {
             throw new Error('No AI model is configured')
         }
@@ -72,24 +75,43 @@ export class ChatCompletionsClient {
         const abort = () => controller.abort(signal?.reason)
         signal?.addEventListener('abort', abort, { once: true })
         try {
+            const protect = (text: string): string => {
+                for (const secret of new Set([apiKey, ...this.configService.knownSecrets])) {
+                    if (secret) { text = text.split(secret).join('[REDACTED]') }
+                }
+                return text
+            }
+            const safeMessages = messages.map(message => ({
+                ...message,
+                content: message.content === null ? null : protect(message.content),
+                ...message.tool_calls ? { tool_calls: message.tool_calls.map(call => {
+                    let args = call.function.arguments
+                    try {
+                        args = JSON.stringify(JSON.parse(args), (_key, value) => typeof value === 'string' ? protect(value) : value)
+                    } catch { args = protect(args) }
+                    return { ...call, 'function': { ...call.function, arguments: args } }
+                }) } : {},
+            }))
+            const body = JSON.stringify({
+                model: config.model,
+                messages: safeMessages,
+                ...tools.length ? { tools, tool_choice: 'auto' } : {},
+                temperature: config.temperature,
+                stream: true,
+            })
+            controller.signal.throwIfAborted()
+            handlers.onRequest?.(body, config.model)
             const response = await fetch(`${config.baseURL.replace(/\/$/, '')}/chat/completions`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    ...config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {},
+                    ...apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
                 },
-                body: JSON.stringify({
-                    model: config.model,
-                    messages,
-                    ...tools.length ? { tools, tool_choice: 'auto' } : {},
-                    temperature: config.temperature,
-                    stream: true,
-                }),
+                body,
                 signal: controller.signal,
             })
             if (!response.ok) {
-                const detail = await response.text()
-                throw new AIRequestError(response.status, detail)
+                throw new AIRequestError(response.status, '模型请求失败，请检查连接设置或服务状态')
             }
             const contentType = response.headers.get('content-type')
             if (contentType && !/^text\/event-stream\b/i.test(contentType)) {
@@ -106,6 +128,7 @@ export class ChatCompletionsClient {
     }
 
     async testConnection (settings: AIConfig['llm'], signal?: AbortSignal): Promise<ConnectionTestResult> {
+        const apiKey = await this.configService.resolveSecret(settings.apiKey)
         if (!settings.baseURL.trim()) {
             throw new Error('API Base URL is required')
         }
@@ -122,7 +145,7 @@ export class ChatCompletionsClient {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    ...settings.apiKey ? { Authorization: `Bearer ${settings.apiKey}` } : {},
+                    ...apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
                 },
                 body: JSON.stringify({
                     model: settings.model,
@@ -133,7 +156,7 @@ export class ChatCompletionsClient {
                 signal: controller.signal,
             })
             if (!response.ok) {
-                throw new AIRequestError(response.status, await response.text())
+                throw new AIRequestError(response.status, '连接测试失败')
             }
             const data = await response.json()
             const choice = data?.choices?.[0]
@@ -151,6 +174,7 @@ export class ChatCompletionsClient {
     }
 
     async listModels (settings: AIConfig['llm'], signal?: AbortSignal): Promise<string[]> {
+        const apiKey = await this.configService.resolveSecret(settings.apiKey)
         if (!settings.baseURL.trim()) {
             throw new Error('API Base URL is required')
         }
@@ -162,11 +186,11 @@ export class ChatCompletionsClient {
         try {
             const response = await fetch(`${settings.baseURL.replace(/\/$/, '')}/models`, {
                 method: 'GET',
-                headers: settings.apiKey ? { Authorization: `Bearer ${settings.apiKey}` } : {},
+                headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
                 signal: controller.signal,
             })
             if (!response.ok) {
-                throw new Error(`Model list request failed (${response.status}): ${(await response.text()).slice(0, 500)}`)
+                throw new Error(`获取模型列表失败（HTTP ${response.status}）`)
             }
             const data = await response.json()
             if (!Array.isArray(data?.data)) {

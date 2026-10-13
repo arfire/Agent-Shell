@@ -41,6 +41,31 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
         f.eof$.next()
         await assert.rejects(result, /未收到退出状态/)
     })
+    await test('exit marker arriving after a delayed native close notification is still drained', async () => {
+        const f = fixture()
+        const result = executeSSH(async () => f.channel, 'docker logs app 2>&1 | tail -10', 'bash', () => undefined)
+        await tick()
+        f.closed$.next()
+        await new Promise(resolve => setTimeout(resolve, 200))
+        f.data$.next(Buffer.from('last log line\n' + f.marker() + ':0\x07'))
+        assert.deepEqual(await result, { output: 'last log line\n', exitCode: 0 })
+    })
+    await test('active stdout and stderr renew the idle deadline instead of cutting off a long download', async () => {
+        const f = fixture()
+        const result = executeSSH(async () => f.channel, 'download', 'bash', () => undefined, undefined, 150)
+        const checked = result.then(value => ({ value }), error => ({ error }))
+        await tick()
+        for (let index = 0; index < 6; index++) {
+            await new Promise(resolve => setTimeout(resolve, 50))
+            if (index % 2) { f.extendedData$.next([1, Buffer.from('progress\r')]) } else { f.data$.next(Buffer.from('progress\r')) }
+        }
+        assert.equal(f.closed, 0)
+        f.data$.next(Buffer.from(f.marker() + ':0\x07'))
+        f.eof$.next()
+        const completed = await checked
+        assert.ok('value' in completed)
+        assert.equal(completed.value.exitCode, 0)
+    })
     await test('SSH timeout and stop release the channel even while opening is stalled', async () => {
         const f = fixture()
         await assert.rejects(executeSSH(async () => f.channel, 'sleep 999', 'bash', () => undefined, undefined, 20), /超时/)

@@ -12,7 +12,11 @@ __ash_ps0='$(__ash_preexec)'$'\e]777;ash;__NONCE__;C\a'${PS0-}
 PS0=$__ash_ps0
 __ash_capture_status () { __ash_status=$?; return "$__ash_status"; }
 __ash_prompt () {
-    printf '\033]777;ash;__NONCE__;PWD;%s\007' "$(printf '%s' "$PWD" | base64 | tr -d '\r\n')"
+    if [[ ${__ash_last_pwd-} != "$PWD" ]]; then
+        __ash_encoded_pwd=$(printf '%s' "$PWD" | base64 | tr -d '\r\n')
+        __ash_last_pwd=$PWD
+    fi
+    printf '\033]777;ash;__NONCE__;PWD;%s\007' "$__ash_encoded_pwd"
     printf '\033]777;ash;__NONCE__;D;%s\007' "$__ash_status"
     if [[ $PS1 != *'777;ash;__NONCE__;'* ]]; then
         __ash_saved_ps1=$PS1
@@ -29,7 +33,7 @@ __ash_uninstall () {
     PROMPT_COMMAND=("${kept[@]}")
     [[ $PS1 == *'777;ash;__NONCE__;'* ]] && PS1=$__ash_saved_ps1
     [[ ${PS0-} == "$__ash_ps0" ]] && PS0=$__ash_saved_ps0
-    unset __ash_saved_ps1 __ash_saved_ps0 __ash_ps0 __ash_status
+    unset __ash_saved_ps1 __ash_saved_ps0 __ash_ps0 __ash_status __ash_last_pwd __ash_encoded_pwd
     unset -f __ash_prompt __ash_capture_status __ash_preexec __ash_uninstall
     printf '\033]777;ash;__NONCE__;U\007'
 }

@@ -30,7 +30,7 @@ export function execEnvelope (command: string, shell: ShellKind, marker: string)
 
 export async function executeSSH (
     open: () => Promise<ExecChannel>, command: string, shell: ShellKind,
-    onOutput: (text: string) => void, signal?: AbortSignal, timeoutMs = 120000,
+    onOutput: (text: string) => void, signal?: AbortSignal, idleTimeoutMs = 600000,
 ): Promise<CommandExecutionResult> {
     signal?.throwIfAborted()
     const subscriptions = new Subscription()
@@ -58,21 +58,27 @@ export async function executeSSH (
             }
             abort = () => finish(signal?.reason ?? new DOMException('Agent stopped', 'AbortError'))
             signal?.addEventListener('abort', abort, { once: true })
-            timer = setTimeout(() => finish(new Error('命令执行超时，已关闭独立 SSH 通道；远端进程状态需重新确认')), timeoutMs)
+            const activity = (): void => {
+                clearTimeout(timer)
+                timer = setTimeout(() => finish(new Error('命令长时间无输出，已因等待超时停止。终端可以继续操作，上方保留最后进度；执行通道已关闭，远端任务是否结束仍需核实。')), idleTimeoutMs)
+            }
+            activity()
             const drain = (): void => {
+                clearTimeout(timer)
                 clearTimeout(drainTimer)
                 // Native stdout, stderr and close callbacks can arrive on different queues.
                 drainTimer = setTimeout(() => {
                     emit(pending + stdout.end() + stderr.end())
                     pending = ''
                     finish(status === undefined ? new Error('SSH 执行通道已结束，但未收到退出状态；请勿假定执行成功') : undefined)
-                }, 100)
+                }, status === undefined ? 1000 : 100)
             }
             void open().then(async opened => {
                 channel = opened
                 if (finished) { await opened.close(); return }
                 subscriptions.add(opened.data$.subscribe(data => {
                     if (finished) { return }
+                    if (data.length) { activity() }
                     pending += stdout.write(Buffer.from(data))
                     const match = pattern.exec(pending)
                     if (match) {
@@ -91,7 +97,11 @@ export async function executeSSH (
                     if (drainTimer) { drain() }
                 }))
                 subscriptions.add(opened.extendedData$.subscribe(([, data]) => {
-                    if (!finished) { emit(stderr.write(Buffer.from(data))); if (drainTimer) { drain() } }
+                    if (!finished) {
+                        if (data.length) { activity() }
+                        emit(stderr.write(Buffer.from(data)))
+                        if (drainTimer) { drain() }
+                    }
                 }))
                 subscriptions.add(opened.eof$.subscribe(drain))
                 subscriptions.add(opened.closed$.subscribe(drain))

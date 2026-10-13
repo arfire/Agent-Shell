@@ -5,6 +5,7 @@ import { AISessionRuntime } from '../session/ai-session.service'
 import { SessionEvent } from '../session/session-event'
 import { TerminalControllerService } from './terminal-controller.service'
 import { terminalText } from './terminal-text'
+import { CommandOutputPresentation } from './command-output-presentation'
 import { TerminalMarkdown, terminalMarkdown } from './terminal-markdown'
 import { historyChunks } from './session-history'
 
@@ -14,6 +15,7 @@ interface Presentation {
     pending: string
     live: string
     filter: TerminalMarkdown
+    output: CommandOutputPresentation
     paused: boolean
     lineEnded: boolean
     timer?: ReturnType<typeof setTimeout>
@@ -24,11 +26,13 @@ interface Presentation {
 @Injectable({ providedIn: 'root' })
 export class AgentTerminalPresenter {
     private runs = new Map<string, Presentation>()
+    private deferred = new Map<string, { text: string, subscription: Subscription }>()
+
+    hasDeferred (sessionId: string): boolean { return this.deferred.has(sessionId) }
 
     constructor (private terminal: TerminalControllerService) { }
 
     async replay (runtime: AISessionRuntime, events: SessionEvent[]): Promise<void> {
-        if (runtime.independentExecution) { return }
         if (!events.length) { return }
         if (runtime.locked || runtime.activeRunId) { throw new Error('请等待当前 Agent 完成') }
         runtime.locked = true
@@ -59,7 +63,7 @@ export class AgentTerminalPresenter {
     }
 
     async open (runtime: AISessionRuntime, runId: string, _stop?: () => void, _seq = 0): Promise<void> {
-        if (runtime.independentExecution) { return }
+        if (runtime.independentExecution && this.runs.has(runId) && !this.terminal.canPresent(runtime)) { return }
         if (runtime.state.value === 'WAITING_INTERACTION' && this.terminal.isExecuting(runtime)) {
             return
         }
@@ -75,6 +79,7 @@ export class AgentTerminalPresenter {
         const presentation: Presentation = {
             runtime, subscriptions: [], pending: '', live: '', paused: false, lineEnded: true,
             filter: new TerminalMarkdown(),
+            output: new CommandOutputPresentation(),
             seq: runtime.events.value.at(-1)?.seq ?? 0,
         }
         this.runs.set(runId, presentation)
@@ -115,8 +120,13 @@ export class AgentTerminalPresenter {
         if (!presentation) { return }
         clearTimeout(presentation.timer)
         presentation.subscriptions.forEach(subscription => subscription.unsubscribe())
-        presentation.pending += presentation.filter.finish()
+        presentation.pending += presentation.output.finish() + presentation.filter.finish()
         try {
+            if (presentation.runtime.independentExecution && !this.terminal.canPresent(presentation.runtime)) {
+                this.defer(presentation.runtime, presentation.pending)
+                presentation.pending = ''
+                return
+            }
             if (presentation.runtime.terminal.value.mode === 'agent' && !this.terminal.isExecuting(presentation.runtime)) {
                 await this.terminal.waitForPrompt(presentation.runtime)
                 presentation.paused = false
@@ -130,6 +140,8 @@ export class AgentTerminalPresenter {
     }
 
     detachSession (sessionId: string): void {
+        this.deferred.get(sessionId)?.subscription.unsubscribe()
+        this.deferred.delete(sessionId)
         for (const [id, presentation] of this.runs) {
             if (presentation.runtime.id !== sessionId) { continue }
             clearTimeout(presentation.timer)
@@ -139,17 +151,44 @@ export class AgentTerminalPresenter {
         }
     }
 
+    private defer (runtime: AISessionRuntime, text: string): void {
+        const previous = this.deferred.get(runtime.id)
+        previous?.subscription.unsubscribe()
+        const item = { text: (previous?.text ?? '') + text, subscription: new Subscription() }
+        this.deferred.set(runtime.id, item)
+        item.subscription.add(runtime.terminal.subscribe(() => {
+            // Let the input middleware finish processing this prompt first.
+            queueMicrotask(() => {
+                if (this.deferred.get(runtime.id) !== item || Boolean(runtime.activeRunId) || !this.terminal.canPresent(runtime)) { return }
+                this.deferred.delete(runtime.id)
+                item.subscription.unsubscribe()
+                void runtime.tab.write('\r\n' + item.text).then(() => this.terminal.restorePrompt(runtime))
+                    .catch(() => undefined)
+            })
+        }))
+    }
+
     private event (presentation: Presentation, event: SessionEvent): void {
         const data = event.data as Record<string, unknown>
         if (event.type === 'ai-message' && !presentation.live) {
             presentation.pending += terminalMarkdown(String(data.content ?? '')) + '\r\n'
-        } else if (event.type === 'ai-command') {
+        } else if (event.type === 'ssh-input' && data.source === 'ai') {
             presentation.pending += '\r\n\x1b[2m' + terminalText(String(data.reason ?? '')) + '\x1b[0m\r\n' +
-                '$ ' + terminalText(String(data.command ?? '')) + '\r\n'
+                (data.riskDescription ? '注意：' + terminalText(String(data.riskDescription)) + '\r\n' : '') +
+                '$ ' + terminalText(String(data.content ?? '')) + '\r\n'
+        } else if (event.type === 'ssh-output' && data.source === 'ai') {
+            presentation.pending += presentation.output.feed(String(data.content ?? ''), presentation.runtime.tab.size?.columns)
+        } else if (event.type === 'command-result' && presentation.runtime.independentExecution) {
+            presentation.pending += presentation.output.finish() + '\r\n\x1b[2m退出状态：' + terminalText(String(data.exitCode ?? '未知')) + '\x1b[0m\r\n'
+            presentation.output = new CommandOutputPresentation()
         } else if (event.type === 'web-activity') {
             presentation.pending += '\r\n\x1b[2m' + terminalText(String(data.content ?? '')) + '\x1b[0m\r\n'
         } else if (event.type === 'error') {
-            presentation.pending += '\r\n\x1b[31mAgent: ' + terminalText(String(data.message ?? '')) + '\x1b[0m\r\n'
+            presentation.pending += presentation.output.finish() + '\r\n' +
+                (data.command ? '未执行命令：\r\n$ ' + terminalText(String(data.command)) + '\r\n' : '') +
+                '\x1b[31mAgent: ' + terminalText(String(data.message ?? '')) + '\x1b[0m\r\n'
+        } else if (event.type === 'agent-state' && data.state === 'CANCELLED' && data.message) {
+            presentation.pending += presentation.output.finish() + '\r\n' + terminalText(String(data.message)) + '\r\n'
         }
     }
 
@@ -162,7 +201,8 @@ export class AgentTerminalPresenter {
     }
 
     private async flush (presentation: Presentation): Promise<void> {
-        if (presentation.paused || !presentation.pending || this.terminal.isExecuting(presentation.runtime) ||
+        if (presentation.paused || !presentation.pending ||
+            this.terminal.isExecuting(presentation.runtime) && !presentation.runtime.independentExecution ||
             presentation.runtime.terminal.value.mode !== 'agent' || presentation.runtime.terminal.value.state !== 'prompt') { return }
         const text = presentation.pending
         presentation.pending = ''

@@ -49,7 +49,7 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
     await test('credential boundary cannot be bypassed in the first three tiers or by edited approval', async () => {
         for (const mode of ['configured', 'auto', 'full']) {
             const config = { config: { ...defaults, policy: { ...defaults.policy, approvalMode: mode } } }
-            const redactor = new SecretRedactor(config as any)
+            const redactor = new SecretRedactor({ ...config, knownSecrets: new Set() } as any)
             let executions = 0
             let edited = 'cat .env'
             const service: any = new AgentService(config as any, null as any, null as any,
@@ -60,18 +60,16 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
             const runtime = { id: 'guard', state: new BehaviorSubject('THINKING'), events: new BehaviorSubject([]) }
             const run = { id: 'run', controller: new AbortController(), stopRequested: false, sensitive: redactor.createScope() }
             for (const command of blocked) {
-                const result = JSON.parse(await service.executeTool(runtime, run, { 'function': { name: 'terminal_exec', arguments: JSON.stringify({ command, reason: 'Test' }) } }))
-                assert.ok(result.error, mode + ': ' + command)
+                await assert.rejects(service.executeTool(runtime, run, { 'function': { name: 'terminal_exec', arguments: JSON.stringify({ command, reason: 'Test' }) } }), /凭证保护/, mode + ': ' + command)
             }
             // Exercise the final execution boundary directly (after all approval edits).
             for (const command of blocked) {
-                const result = JSON.parse(await service.executeApprovedCommand(runtime, run, command, 'Test', { risk: 'SAFE' }, { mode, policy: config.config.policy }))
-                assert.ok(result.error)
+                await assert.rejects(service.executeApprovedCommand(runtime, run, command, 'Test', { risk: 'SAFE' }, { mode, policy: config.config.policy }), /凭证保护/)
             }
             if (mode === 'configured') {
                 for (const command of ['cat .env', 'mysql -pguess', 'docker inspect db']) {
                     edited = command
-                    assert.ok(JSON.parse(await service.executeTool(runtime, run, { 'function': { name: 'terminal_exec', arguments: '{"command":"touch /tmp/test","reason":"Test"}' } })).error)
+                    await assert.rejects(service.executeTool(runtime, run, { 'function': { name: 'terminal_exec', arguments: '{"command":"touch /tmp/test","reason":"Test"}' } }), /凭证保护/)
                 }
             }
             assert.equal(executions, 0)
@@ -79,7 +77,7 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
     })
     await test('credential fields and MySQL arguments are redacted while local placeholders remain usable', async () => {
         for (const enabled of [true, false]) {
-            const redactor = new SecretRedactor({ config: { ...defaults, redaction: { ...defaults.redaction, enabled } } } as any)
+            const redactor = new SecretRedactor({ knownSecrets: new Set(), config: { ...defaults, redaction: { ...defaults.redaction, enabled } } } as any)
             for (const source of ['MYSQL_ROOT_PASSWORD=test-secret', 'MYSQL_PASSWORD="test-secret"',
                 '{"db_password":"test-secret"}', 'mysql -u root -ptest-secret db', 'PGPASSWORD=test-secret']) {
                 assert.equal(redactor.redact(source).includes('test-secret'), false, source)
@@ -97,7 +95,7 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
     await test('unrestricted allows protected commands and raw results while lower tiers remain redacted', async () => {
         for (const command of blocked) { assert.equal(credentialAccessReason(command, 'unrestricted'), undefined) }
         let unrestricted = true
-        const redactor = new SecretRedactor({ config: defaults } as any)
+        const redactor = new SecretRedactor({ knownSecrets: new Set(), config: defaults } as any)
         const scope = redactor.createScope(() => unrestricted)
         const output = 'DB_PASSWORD=synthetic-permission-test\n'
         const filter = scope.streamFilter(true)
@@ -110,7 +108,7 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
         assert.equal(filter(output).includes('synthetic-permission-test'), false)
     })
     await test('unknown credential output is hidden across every transport split including private key bodies', async () => {
-        const redactor = new SecretRedactor({ config: defaults } as any)
+        const redactor = new SecretRedactor({ knownSecrets: new Set(), config: defaults } as any)
         for (const source of ['MYSQL_ROOT_PASSWORD=test-secret\r\nnext\n', '{"MYSQL_PASSWORD":"test-secret"}\n',
             'MYSQL_\x1b[31mPASSWORD=test-secret\x1b[0m\n', 'DB_PASSWORD="test-secret\nPRIVATEBODY"\nnext\n',
             '-----BEGIN PRIVATE KEY-----\nPRIVATEBODY\n-----END PRIVATE KEY-----\nnext\n']) {
@@ -124,7 +122,7 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
     await test('history flushes cannot persist half a password across separate events', async () => {
         const saved: string[] = []
         const runtime: any = { id: 'capture-test' }
-        const redactor = new SecretRedactor({ config: defaults } as any)
+        const redactor = new SecretRedactor({ knownSecrets: new Set(), config: defaults } as any)
         const capture = new AISessionCaptureMiddleware(runtime, {
             appendToContext: async (_runtime: unknown, _id: string, _type: string, data: { content: string }) => saved.push(data.content),
         } as any, redactor)

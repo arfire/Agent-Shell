@@ -2,7 +2,6 @@
 import { Component, HostBinding } from '@angular/core'
 import { NgbModal } from '@ng-bootstrap/ng-bootstrap'
 import { BaseComponent, VaultService, VaultSecret, Vault, PlatformService, ConfigService, VAULT_SECRET_TYPE_FILE, PromptModalComponent, VaultFileSecret, TranslateService } from 'tabby-core'
-import { SetVaultPassphraseModalComponent } from './setVaultPassphraseModal.component'
 import { ShowSecretModalComponent } from './showSecretModal.component'
 
 
@@ -13,6 +12,7 @@ import { ShowSecretModalComponent } from './showSecretModal.component'
 })
 export class VaultSettingsTabComponent extends BaseComponent {
     vaultContents: Vault|null = null
+    loadError = ''
     VAULT_SECRET_TYPE_FILE = VAULT_SECRET_TYPE_FILE
 
     @HostBinding('class.content-box') true
@@ -31,16 +31,13 @@ export class VaultSettingsTabComponent extends BaseComponent {
     }
 
     async loadVault (): Promise<void> {
-        this.vaultContents = await this.vault.load()
+        this.loadError = ''
+        try { this.vaultContents = await this.vault.load() } catch (error) { this.loadError = String(error) }
     }
 
     async enableVault () {
-        const modal = this.ngbModal.open(SetVaultPassphraseModalComponent)
-        const newPassphrase = await modal.result.catch(() => null)
-        if (newPassphrase) {
-            await this.vault.setEnabled(true, newPassphrase)
-            this.vaultContents = await this.vault.load(newPassphrase)
-        }
+        await this.vault.ensureEnabled()
+        this.vaultContents = await this.vault.load()
     }
 
     async disableVault () {
@@ -60,20 +57,6 @@ export class VaultSettingsTabComponent extends BaseComponent {
         }
     }
 
-    async changePassphrase () {
-        if (!this.vaultContents) {
-            this.vaultContents = await this.vault.load()
-        }
-        if (!this.vaultContents) {
-            return
-        }
-        const modal = this.ngbModal.open(SetVaultPassphraseModalComponent)
-        const newPassphrase = await modal.result.catch(() => null)
-        if (newPassphrase) {
-            this.vault.save(this.vaultContents, newPassphrase)
-        }
-    }
-
     async toggleConfigEncrypted () {
         this.config.store.encrypted = !this.config.store.encrypted
         try {
@@ -85,6 +68,9 @@ export class VaultSettingsTabComponent extends BaseComponent {
     }
 
     getSecretLabel (secret: VaultSecret) {
+        if (secret.type === 'ai:credential' || secret.type === 'ai:agent-credential') {
+            return (secret.key as { description?: string }).description ?? 'Agent 凭证'
+        }
         if (secret.type === 'ssh:password') {
             return this.translate.instant('SSH password for {user}@{host}:{port}', (secret as any).key)
         }
@@ -150,8 +136,6 @@ export class VaultSettingsTabComponent extends BaseComponent {
     }
 
     async exportFile (secret: VaultFileSecret) {
-        this.vault.forgetPassphrase()
-
         // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion
         secret = (await this.vault.getSecret(secret.type, secret.key)) as VaultFileSecret
 

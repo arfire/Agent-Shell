@@ -1,11 +1,8 @@
 import * as crypto from 'crypto'
 import { promisify } from 'util'
 import { Injectable, NgZone } from '@angular/core'
-import { NgbModal } from '@ng-bootstrap/ng-bootstrap'
 import { AsyncSubject, Subject, Observable } from 'rxjs'
-import { wrapPromise, serializeFunction } from '../utils'
-import { UnlockVaultModalComponent } from '../components/unlockVaultModal.component'
-import { NotificationsService } from './notifications.service'
+import { wrapPromise } from '../utils'
 import { SelectorService } from './selector.service'
 import { FileProvider } from '../api/fileProvider'
 import { PlatformService } from '../api/platform'
@@ -19,6 +16,8 @@ const CRYPT_IV_LENGTH = 128 / 8
 
 export interface StoredVault {
     version: number
+    /** Local automatic unlock; this is not protection against access to the data directory. */
+    localKey?: string
     contents: string
     keySalt: string
     iv: string
@@ -45,16 +44,16 @@ export interface Vault {
 // eslint-disable-next-line @typescript-eslint/no-empty-interface
 export interface VaultSecretKey { }
 
-function migrateVaultContent (content: any): Vault {
+function vaultContent (content: any): Vault {
     return {
         config: content.config,
         secrets: content.secrets ?? [],
     }
 }
 
-function deriveVaultKey (passphrase: string, salt: Buffer): Promise<Buffer> {
+function deriveVaultKey (localKey: string, salt: Buffer): Promise<Buffer> {
     return promisify(crypto.pbkdf2)(
-        Buffer.from(passphrase),
+        Buffer.from(localKey),
         salt,
         PBKDF_ITERATIONS,
         CRYPT_KEY_LENGTH,
@@ -62,41 +61,38 @@ function deriveVaultKey (passphrase: string, salt: Buffer): Promise<Buffer> {
     )
 }
 
-async function encryptVault (content: Vault, passphrase: string): Promise<StoredVault> {
+async function encryptVault (content: Vault, localKey: string): Promise<StoredVault> {
     const keySalt = await promisify(crypto.randomBytes)(PBKDF_SALT_LENGTH)
     const iv = await promisify(crypto.randomBytes)(CRYPT_IV_LENGTH)
-    const key = await deriveVaultKey(passphrase, keySalt)
+    const key = await deriveVaultKey(localKey, keySalt)
 
     const plaintext = JSON.stringify(content)
     const cipher = crypto.createCipheriv(CRYPT_ALG, key, iv)
     const encrypted = Buffer.concat([cipher.update(plaintext, 'utf-8'), cipher.final()])
 
     return {
-        version: 1,
+        version: 2,
+        localKey,
         contents: encrypted.toString('base64'),
         keySalt: keySalt.toString('hex'),
         iv: iv.toString('hex'),
     }
 }
 
-async function decryptVault (vault: StoredVault, passphrase: string): Promise<Vault> {
-    if (vault.version !== 1) {
-        throw new Error(`Unsupported vault format version ${vault.version}`)
-    }
+async function decryptVault (vault: StoredVault): Promise<Vault> {
+    if (vault.version !== 2) { throw new Error('不支持此凭据格式，原数据未改动。请在设置中重新配置凭据。') }
+    if (!/^[a-f0-9]{64}$/.test(vault.localKey ?? '')) { throw new Error('本地凭据数据损坏，未覆盖原数据') }
     const keySalt = Buffer.from(vault.keySalt, 'hex')
-    const key = await deriveVaultKey(passphrase, keySalt)
+    const key = await deriveVaultKey(vault.localKey!, keySalt)
     const iv = Buffer.from(vault.iv, 'hex')
     const encrypted = Buffer.from(vault.contents, 'base64')
 
     const decipher = crypto.createDecipheriv(CRYPT_ALG, key, iv)
     const plaintext = decipher.update(encrypted, undefined, 'utf-8') + decipher.final('utf-8')
-    return migrateVaultContent(JSON.parse(plaintext))
+    return vaultContent(JSON.parse(plaintext))
 }
 
 export const VAULT_SECRET_TYPE_FILE = 'file'
-
-// Don't make it accessible through VaultService fields
-let _rememberedPassphrase: string|null = null
 
 @Injectable({ providedIn: 'root' })
 export class VaultService {
@@ -108,89 +104,87 @@ export class VaultService {
     store: StoredVault|null = null
     private ready = new AsyncSubject<boolean>()
     private contentChanged = new Subject<void>()
+    private persist?: () => Promise<void>
+    private enablePending?: Promise<void>
+    private mutation = Promise.resolve()
 
     /** @hidden */
     private constructor (
         private zone: NgZone,
-        private notifications: NotificationsService,
-        private ngbModal: NgbModal,
     ) {
-        this.getPassphrase = serializeFunction(this.getPassphrase.bind(this))
+        const addSecret = this.addSecret.bind(this)
+        const updateSecret = this.updateSecret.bind(this)
+        const removeSecret = this.removeSecret.bind(this)
+        this.addSecret = secret => this.mutate(() => addSecret(secret))
+        this.updateSecret = (secret, update) => this.mutate(() => updateSecret(secret, update))
+        this.removeSecret = (type, key) => this.mutate(() => removeSecret(type, key))
     }
 
-    async setEnabled (enabled: boolean, passphrase?: string): Promise<void> {
+    private mutate (action: () => Promise<void>): Promise<void> {
+        const pending = this.mutation.then(action)
+        this.mutation = pending.catch(() => undefined)
+        return pending
+    }
+
+    setPersistence (persist: () => Promise<void>): void {
+        this.persist = persist
+    }
+
+    async ensureEnabled (): Promise<void> {
+        await this.ready$.toPromise()
+        if (this.isEnabled()) { return }
+        if (!this.enablePending) {
+            this.enablePending = (async () => {
+                await this.setEnabled(true)
+            })().finally(() => { this.enablePending = undefined })
+        }
+        return this.enablePending
+    }
+
+    async setEnabled (enabled: boolean): Promise<void> {
         if (enabled) {
             if (!this.store) {
-                await this.save(migrateVaultContent({}), passphrase)
+                await this.save(vaultContent({}))
             }
         } else {
+            const previous = this.store
             this.store = null
+            try { await this.persist?.() } catch (error) { this.store = previous; throw error }
             this.contentChanged.next()
         }
     }
 
     isOpen (): boolean {
-        return !!_rememberedPassphrase
+        return this.store?.version === 2
     }
 
-    forgetPassphrase (): void {
-        _rememberedPassphrase = null
+    async decrypt (storage: StoredVault): Promise<Vault> {
+        return wrapPromise(this.zone, decryptVault(storage))
     }
 
-    async decrypt (storage: StoredVault, passphrase?: string): Promise<Vault> {
-        if (!passphrase) {
-            passphrase = await this.getPassphrase()
-        }
-        try {
-            return await wrapPromise(this.zone, decryptVault(storage, passphrase))
-        } catch (e) {
-            this.forgetPassphrase()
-            if (e.toString().includes('BAD_DECRYPT')) {
-                this.notifications.error('Incorrect passphrase')
-            }
-            throw e
-        }
-    }
-
-    async load (passphrase?: string): Promise<Vault|null> {
+    async load (): Promise<Vault|null> {
         if (!this.store) {
             return null
         }
-        return this.decrypt(this.store, passphrase)
+        return this.decrypt(this.store)
     }
 
-    async encrypt (vault: Vault, passphrase?: string): Promise<StoredVault|null> {
-        if (!passphrase) {
-            passphrase = await this.getPassphrase()
-        }
-        if (_rememberedPassphrase) {
-            _rememberedPassphrase = passphrase
-        }
-        return wrapPromise(this.zone, encryptVault(vault, passphrase))
+    async encrypt (vault: Vault): Promise<StoredVault> {
+        // Portable and deliberately passwordless: the unlock key travels with
+        // the data, without OS credential storage or a machine-bound secret.
+        const localKey = (await promisify(crypto.randomBytes)(32)).toString('hex')
+        return wrapPromise(this.zone, encryptVault(vault, localKey))
     }
 
-    async save (vault: Vault, passphrase?: string): Promise<void> {
+    async save (vault: Vault): Promise<void> {
         await this.ready$.toPromise()
-        this.store = await this.encrypt(vault, passphrase)
-        this.contentChanged.next()
-    }
-
-    async getPassphrase (): Promise<string> {
-        if (!_rememberedPassphrase) {
-            const modal = this.ngbModal.open(UnlockVaultModalComponent)
-            const result = await modal.result.catch(() => null)
-            if (!result) {
-                throw new Error('Vault unlock cancelled')
-            }
-            const { passphrase, rememberFor } = result
-            setTimeout(() => {
-                _rememberedPassphrase = null
-                // avoid multiple consequent prompts
-            }, Math.max(1000, rememberFor * 60000))
-            _rememberedPassphrase = passphrase
+        const previous = this.store
+        this.store = await this.encrypt(vault)
+        try { await this.persist?.() } catch (error) {
+            this.store = previous
+            throw error
         }
-
-        return _rememberedPassphrase!
+        this.contentChanged.next()
     }
 
     async getSecret (type: string, key: VaultSecretKey): Promise<VaultSecret|null> {
@@ -212,7 +206,7 @@ export class VaultService {
         await this.ready$.toPromise()
         const vault = await this.load()
         if (!vault) {
-            return
+            throw new Error('保险库尚未启用，凭证未保存')
         }
         vault.secrets = vault.secrets.filter(s => s.type !== secret.type || !this.keyMatches(secret.key, s))
         vault.secrets.push(secret)
@@ -247,8 +241,11 @@ export class VaultService {
         return Object.keys(key).every(k => secret.key[k] === key[k])
     }
 
-    setStore (store: StoredVault): void {
-        this.store = store
+    setStore (store: StoredVault|null): void {
+        // Only the current passwordless format participates in credential IO.
+        // Loading an unsupported container must not block entering new keys.
+        // The config on disk changes only when the user saves new credentials.
+        this.store = store?.version === 2 ? store : null
         this.ready.next(true)
         this.ready.complete()
     }
@@ -280,7 +277,7 @@ export class VaultFileProvider extends FileProvider {
     async selectAndStoreFile (description: string): Promise<string> {
         const vault = await this.vault.load()
         if (!vault) {
-            throw new Error('Vault is locked')
+            throw new Error('本地凭据保存尚未启用')
         }
         const files = vault.secrets.filter(x => x.type === VAULT_SECRET_TYPE_FILE) as VaultFileSecret[]
         if (files.length) {

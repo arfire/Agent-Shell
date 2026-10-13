@@ -24,6 +24,8 @@ export class AIInputMiddleware extends SessionMiddleware {
     private anchorColumns = 0
     private promptCellOffset = 0
     private queue = Promise.resolve()
+    private pendingOutput: Buffer[] = []
+    private outputScheduled = false
 
     constructor (
         private runtime: AISessionRuntime,
@@ -56,21 +58,38 @@ export class AIInputMiddleware extends SessionMiddleware {
     get readlineOwned (): boolean { return this.handedOff }
 
     feedFromSession (data: Buffer): void {
-        if (this.buffer && this.canCapture) {
+        if (this.outputScheduled || this.pendingOutput.length || this.buffer && this.canCapture) {
+            if (data.length) { this.pendingOutput.push(data) }
+            if (this.outputScheduled) { return }
+            this.outputScheduled = true
             this.enqueue(async () => {
-                if (!this.buffer || !this.canCapture) {
-                    this.outputToTerminal.next(data)
-                    return
+                try {
+                    const redraw = !!this.buffer && this.canCapture
+                    if (redraw) { await this.erase() }
+                    const output = Buffer.concat(this.pendingOutput)
+                    this.pendingOutput = []
+                    this.outputToTerminal.next(output)
+                    if (!redraw) { return }
+                    await this.flushTerminal()
+                    if (!this.buffer || !this.canCapture) { return }
+                    const frontend = this.runtime.tab.frontend
+                    // Reuse an empty row after CRLF, but keep progress output
+                    // that only returned to column zero with CR on its own row.
+                    const screen = frontend instanceof XTermFrontend ? frontend.xterm.buffer.active : undefined
+                    const emptyRow = screen?.cursorX === 0 && !screen.getLine(screen.baseY + screen.cursorY)?.translateToString(true)
+                    const newline = emptyRow ? '' : '\r\n'
+                    await this.runtime.tab.write(newline + this.integration.promptText)
+                    await this.flushTerminal()
+                    this.anchor?.dispose()
+                    this.anchor = undefined
+                    this.captureAnchor()
+                    await this.paint()
+                } finally {
+                    this.outputScheduled = false
+                    // Keep later chunks behind an in-flight redraw, even when
+                    // prompt ownership changes before it completes.
+                    if (this.pendingOutput.length) { this.feedFromSession(Buffer.alloc(0)) }
                 }
-                await this.erase()
-                this.outputToTerminal.next(data)
-                await this.flushTerminal()
-                await this.runtime.tab.write('\r\n' + this.integration.promptText)
-                await this.flushTerminal()
-                this.anchor?.dispose()
-                this.anchor = undefined
-                this.captureAnchor()
-                await this.paint()
             })
         } else {
             this.outputToTerminal.next(data)
@@ -79,7 +98,7 @@ export class AIInputMiddleware extends SessionMiddleware {
 
     feedFromTerminal (data: Buffer): void {
         // Device/status replies and focus notifications are terminal protocol, not typed drafts.
-        if (/^(?:\x1b\[(?:\??\d+;\d+R|[?>]?[\d;]*c|\??\d+;\d+\$y|[IO])|\x1b\](?:10|11|12);rgb:[\da-f/]+(?:\x07|\x1b\\)|\x1bP[01]\+r[\da-f=;]*\x1b\\)+$/i.test(data.toString())) {
+        if (/^(?:\x1b\[(?:\??\d+;\d+R|[?>]?[\d;]*c|\??\d+;\d+\$y|[IO])|\x1b\](?:10|11|12);rgb:[\da-fA-F/]+(?:\x07|\x1b\\)|\x1bP[01]\+r[\da-fA-F=;]*\x1b\\)+$/.test(data.toString())) {
             this.sendAgent(data)
             return
         }
@@ -187,10 +206,15 @@ export class AIInputMiddleware extends SessionMiddleware {
         this.awaitingPrompt = true
     }
 
-    async settled (): Promise<void> { await this.queue; await this.flushTerminal() }
+    async settled (): Promise<void> {
+        let pending = this.queue
+        do { pending = this.queue; await pending } while (pending !== this.queue)
+        await this.flushTerminal()
+    }
 
     close (): void {
         this.closed = true
+        this.pendingOutput = []
         this.resetInputBuffer()
         this.decoder.end()
         super.close()
@@ -279,9 +303,10 @@ export class AIInputMiddleware extends SessionMiddleware {
             await this.erase()
             this.resetInputBuffer()
             this.integration.commandStarted()
-            void this.sessions.append(this.runtime, 'ssh-input', { content: input, source: 'user' })
+            if (input.trim()) { void this.sessions.append(this.runtime, 'ssh-input', { content: input, source: 'user' }) }
             this.sendAgent(this.remoteText(route === 'auto' ? unwrapShellFence(input) : input) + '\r')
         } else {
+            if (this.runtime.activeRunId) { this.onBlockedInput(); return }
             this.cursor = this.buffer.length
             await this.paint()
             this.resetInputBuffer()
@@ -438,9 +463,26 @@ export class AIInputMiddleware extends SessionMiddleware {
             return
         }
         await this.flushTerminal()
-        const marker = frontend.xterm.registerMarker(0)
-        const column = frontend.xterm.buffer.active.cursorX
-        await this.runtime.tab.write(terminalText(this.buffer.slice(this.cursor)))
+        let marker = frontend.xterm.registerMarker(0)
+        let column = frontend.xterm.buffer.active.cursorX
+        const suffix = terminalText(this.buffer.slice(this.cursor))
+        const first = [...suffix][0] ?? ''
+        // xterm defers wrapping until the next printable character. Render that
+        // character before locating the caret, including wide glyphs that do
+        // not fit in the last cell of the preceding row.
+        if (first && first !== '\r' && first !== '\n') {
+            await this.runtime.tab.write(first)
+            await this.flushTerminal()
+            const buffer = frontend.xterm.buffer.active
+            if (marker && buffer.baseY + buffer.cursorY > marker.line) {
+                marker.dispose()
+                marker = frontend.xterm.registerMarker(0)
+                column = 0
+            }
+            await this.runtime.tab.write(suffix.slice(first.length))
+        } else {
+            await this.runtime.tab.write(suffix)
+        }
         await this.flushTerminal()
         if (marker && !marker.isDisposed) {
             const row = Math.max(0, marker.line - frontend.xterm.buffer.active.baseY)

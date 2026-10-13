@@ -1,8 +1,8 @@
 .text-center(*ngIf='!vault.isEnabled()')
     i.fas.fa-key.fa-3x.m-3
     h3.m-3(translate) Vault is not configured
-    .m-3(translate) Vault is an always-encrypted container for secrets such as SSH passwords and private key passphrases.
-    button.btn.btn-primary.m-2((click)='enableVault()', translate) Set master passphrase
+    .m-3 本地保存 SSH 密码和 API Key，自动读取，无需主密码。
+    button.btn.btn-primary.m-2((click)='enableVault()') 启用本地凭据保存
 
 
 div(*ngIf='vault.isEnabled()')
@@ -11,13 +11,11 @@ div(*ngIf='vault.isEnabled()')
         .d-flex.ms-auto(ngbDropdown, *ngIf='vault.isEnabled()')
             button.btn.btn-secondary(ngbDropdownToggle, translate) Options
             div(ngbDropdownMenu)
-                a(ngbDropdownItem, (click)='changePassphrase()')
-                    i.fas.fa-fw.fa-key
-                    span(translate) Change the master passphrase
                 a(ngbDropdownItem, (click)='disableVault()')
                     i.fas.fa-fw.fa-radiation-alt
                     span(translate) Erase the Vault
 
+    p.text-muted 凭据和自动读取密钥一起保存在数据目录中。便携版移动时请保留完整 data 目录；拥有完整目录的人可以读取已保存的凭据。
     div(*ngIf='vaultContents')
         .text-center(*ngIf='!vaultContents.secrets.length')
             i.fas.fa-empty-set.fa-3x
@@ -72,5 +70,6 @@ div(*ngIf='vault.isEnabled()')
 
     .text-center(*ngIf='!vaultContents')
         i.fas.fa-key.fa-3x
-        h3.m-3(translate) Vault is locked
-        button.btn.btn-primary.m-2((click)='loadVault()', translate) Show vault contents
+        h3.m-3 已保存的凭据
+        p.text-danger(*ngIf='loadError', role='alert') {{loadError}}
+        button.btn.btn-primary.m-2((click)='loadVault()') 查看凭据

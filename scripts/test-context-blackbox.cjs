@@ -1,0 +1,56 @@
+const assert = require('node:assert/strict')
+const { connect } = require('./agent-blackbox-driver.cjs')
+async function main () {
+    const ui = await connect()
+    const dock = `[...document.querySelectorAll('ash-agent-dock')].find(e=>e.getBoundingClientRect().width>0&&e.getBoundingClientRect().x>=0)`
+    const idle = `!!${dock} && !${dock}.querySelector('.stop-button')`
+    const events = async () => (await (await fetch(`http://127.0.0.1:${ui.info.controlPort}/state`)).json()).events
+    try {
+        await ui.wait(`document.body.innerText.includes('Blackbox bash')`, 'fixture ready')
+        if (!await ui.read(`!!${dock}`)) await ui.click('.tree-item span', 'Blackbox bash', 'left', 2)
+        await ui.wait(`!!${dock} && !${dock}.querySelector('.notice')`, 'terminal ready')
+        assert.equal(await ui.read(`document.querySelectorAll('.agent-transcript,.agent-composer').length`), 0)
+        assert.ok(await ui.read(`${dock}.getBoundingClientRect().height`) < 70, 'Idle footer stays compact')
+        await ui.click('.context-toggle')
+        await ui.wait(`!!document.querySelector('.context-empty')`, 'empty context')
+        const checkLayout = async () => {
+            const rects = await ui.read(`(()=>{const d=${dock};const p=d.querySelector('.context-panel').getBoundingClientRect();const t=d.parentElement.getBoundingClientRect();const x=d.parentElement.querySelector('.content').getBoundingClientRect();return {top:p.top-t.top,right:p.right-t.right,height:p.height/t.height,overlap:x.right-p.left}})()`)
+            assert.ok(Math.abs(rects.top) <= 1 && Math.abs(rects.right) <= 1)
+            assert.ok(rects.height > .98, 'Context spans the whole terminal panel')
+            assert.ok(rects.overlap <= 1, 'Context does not cover terminal cells')
+        }
+        await checkLayout()
+        await ui.click('.xterm-screen')
+        await ui.type('BB_UNAME')
+        await ui.key('Enter', 'Enter')
+        await ui.wait(`document.querySelector('.context-raw pre')?.textContent.includes('Linux') && (${idle})`, 'context receives actual tool result')
+        const last = (await events()).filter(e => e.scenario === 'BB_UNAME').at(-1)
+        assert.deepEqual(JSON.parse(await ui.read(`document.querySelector('.context-raw pre').textContent`)), last.request)
+        assert.equal(await ui.read(`document.querySelectorAll('.context-message').length`), last.request.messages.length)
+        await ui.screenshot('context-full-height-desktop')
+        await ui.resize(760, 600)
+        await checkLayout()
+        await ui.screenshot('context-full-height-narrow')
+        await ui.click('.xterm-screen')
+        await ui.type('BB_STATUS')
+        await ui.key('Enter', 'Enter')
+        await ui.wait(`!!${dock}.querySelector('.interaction textarea')`, 'narrow context command approval')
+        await ui.click('button', '允许执行')
+        await ui.wait(idle, 'narrow command returns automatically')
+        assert.equal(await ui.read(`${dock}.querySelectorAll('.interaction').length`), 0)
+        await ui.click('.context-panel button')
+        await ui.wait(`!document.querySelector('.context-panel') && document.activeElement.classList.contains('context-toggle')`, 'close restores focus')
+        await ui.call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r' })
+        await ui.call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 })
+        await ui.wait(`document.activeElement.classList.contains('context-panel')`, 'keyboard opens context')
+        await ui.key('Escape', 'Escape')
+        await ui.wait(`!document.querySelector('.context-panel')`, 'Escape closes context')
+        ui.report('PASS: full-height right context, exact latest submitted body, compact footer, desktop/narrow layout and keyboard focus')
+        assert.equal(ui.errors.length, 0)
+        console.log('Context UI black-box checks passed')
+    } finally {
+        await ui.resize().catch(() => {})
+        ui.close()
+    }
+}
+main().catch(error => { console.error(error); process.exitCode = 1 })

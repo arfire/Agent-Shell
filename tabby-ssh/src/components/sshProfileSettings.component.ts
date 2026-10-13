@@ -18,6 +18,7 @@ export class SSHProfileSettingsComponent implements ProfileSettingsComponent<SSH
     Platform = Platform
     profile: ProxifiedConfig<FullyDefined<SSHProfile>>
     hasSavedPassword: boolean
+    passwordError = ''
 
     connectionMode: 'direct'|'proxyCommand'|'jumpHost'|'socksProxy'|'httpProxy' = 'direct'
 
@@ -75,15 +76,19 @@ export class SSHProfileSettingsComponent implements ProfileSettingsComponent<SSH
         try {
             const result = await modal.result.catch(() => null)
             if (result?.value) {
-                this.passwordStorage.savePassword(this.profile, result.value)
+                await this.passwordStorage.savePassword(this.profile, result.value)
                 this.hasSavedPassword = true
+                this.passwordError = ''
             }
-        } catch { }
+        } catch { this.passwordError = '密码未保存，请检查本地数据文件是否可写。' }
     }
 
-    clearSavedPassword () {
-        this.hasSavedPassword = false
-        this.passwordStorage.deletePassword(this.profile)
+    async clearSavedPassword () {
+        try {
+            await this.passwordStorage.deletePassword(this.profile)
+            this.hasSavedPassword = false
+            this.passwordError = ''
+        } catch { this.passwordError = '无法移除密码，请检查本地数据文件是否可写。' }
     }
 
     async addPrivateKey () {

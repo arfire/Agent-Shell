@@ -8,7 +8,7 @@ export const APPROVAL_MODES: { value: ApprovalMode, label: string, description: 
     { value: 'configured', label: '按配置执行', description: '只读查询可自动执行；修改逐条审批，危险操作二次确认，禁止规则始终生效。' },
     { value: 'auto', label: '帮我批准', description: '自动批准单次确认的命令；双次确认仍由你确认，禁止规则和敏感读取限制继续生效。' },
     { value: 'full', label: '完全放行', description: '自动批准单次、双次确认的命令；禁止规则和敏感读取限制继续生效。' },
-    { value: 'unrestricted', label: '放手一搏', description: '跳过命令审批、禁止规则和敏感读取限制。配置和凭据可能发送给模型服务商；仍受服务器账号权限限制。' },
+    { value: 'unrestricted', label: '放手一搏', description: '解开最后的枷锁，踏入高风险领域：跳过命令审批、禁止规则和敏感读取限制。配置和凭据可能发送给模型服务商；仍受服务器账号权限限制。' },
 ]
 
 export interface CommandAuthorization {

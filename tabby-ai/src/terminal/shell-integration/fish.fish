@@ -6,7 +6,11 @@ function __ash_return_status
 end
 function fish_prompt
     set -l ash_status $status
-    printf '\e]777;ash;__NONCE__;PWD;%s\a' (printf '%s' "$PWD" | base64 | string join '')
+    if not set -q __ash_last_pwd; or test "$__ash_last_pwd" != "$PWD"
+        set -g __ash_encoded_pwd (printf '%s' "$PWD" | base64 | string join '')
+        set -g __ash_last_pwd "$PWD"
+    end
+    printf '\e]777;ash;__NONCE__;PWD;%s\a' "$__ash_encoded_pwd"
     printf '\e]777;ash;__NONCE__;D;%s\a\e]777;ash;__NONCE__;A\a' $ash_status
     __ash_return_status $ash_status
     __ash_saved_prompt
@@ -22,6 +26,8 @@ function __ash_uninstall
         functions -c __ash_saved_prompt fish_prompt
     end
     functions -e __ash_saved_prompt __ash_return_status __ash_preexec __ash_uninstall
+    set -e __ash_last_pwd
+    set -e __ash_encoded_pwd
     printf '\e]777;ash;__NONCE__;U\a'
 end
 printf '\e]777;ash;__NONCE__;READY;fish\a'

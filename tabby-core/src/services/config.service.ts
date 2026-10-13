@@ -173,9 +173,13 @@ export class ConfigService {
     ) {
         this.defaults = this.mergeDefaults()
         setTimeout(() => this.init())
-        vault.contentChanged$.subscribe(() => {
+        vault.setPersistence(async () => {
+            const previous = this.store.vault
             this.store.vault = vault.store
-            this.save()
+            try { await this.save() } catch (error) {
+                this.store.vault = previous
+                throw error
+            }
         })
         this.save = serializeFunction(this.save.bind(this))
     }
@@ -236,6 +240,7 @@ export class ConfigService {
         let cleanStore = JSON.parse(JSON.stringify(this._store))
         cleanStore = await this.maybeEncryptConfig(cleanStore)
         await this.platform.saveConfig(yaml.dump(cleanStore))
+        if (cleanStore.encrypted) { this.store.vault = cleanStore.vault }
         this.emitChange()
     }
 
@@ -458,32 +463,19 @@ export class ConfigService {
         if (!store.encrypted) {
             return store
         }
+        if (store.vault?.version !== 2) {
+            const message = '无法读取此配置格式，原文件未改动。此版本不再支持旧加密配置。'
+            await this.platform.showMessageBox({ type: 'error', message, buttons: ['关闭程序'] })
+            this.platform.quit()
+            throw new Error(message)
+        }
         // eslint-disable-next-line @typescript-eslint/init-declarations
         let decryptedVault: Vault
         while (true) {
             try {
-                const passphrase = await this.vault.getPassphrase()
-                decryptedVault = await this.vault.decrypt(store.vault, passphrase)
+                decryptedVault = await this.vault.decrypt(store.vault)
                 break
             } catch (e) {
-                if (e.toString().includes('Vault unlock cancelled')) {
-                    const cancelResult = await this.platform.showMessageBox({
-                        type: 'warning',
-                        message: this.translate.instant('Vault is locked'),
-                        detail: this.translate.instant('The vault must be unlocked to load your configuration.'),
-                        buttons: [
-                            this.translate.instant('Try again'),
-                            this.translate.instant('Quit'),
-                        ],
-                        defaultId: 0,
-                        cancelId: 1,
-                    })
-                    if (cancelResult.response === 1) {
-                        this.platform.quit()
-                        return {}
-                    }
-                    continue
-                }
                 let result = await this.platform.showMessageBox({
                     type: 'error',
                     message: this.translate.instant('Could not decrypt config'),
@@ -532,7 +524,7 @@ export class ConfigService {
         if (!store.encrypted) {
             return store
         }
-        const vault = await this.vault.load()
+        const vault = this.vault.store ? await this.vault.decrypt(this.vault.store) : null
         if (!vault) {
             throw new Error('Vault not configured')
         }

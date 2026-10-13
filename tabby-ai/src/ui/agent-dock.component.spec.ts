@@ -104,4 +104,25 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
         sessions.detach(a.tab)
         sessions.detach(b.tab)
     })
+    await test('context preview preserves submitted text and tool arguments and ignores other sessions', async () => {
+        const f = fixture(new AgentInteractionService(), 'context')
+        try {
+            const body = JSON.stringify({ messages: [
+                { role: 'system', content: 'system rules' },
+                { role: 'user', content: 'password=__TABBY_SENSITIVE_1__' },
+                { role: 'assistant', tool_calls: [{ 'function': { name: 'terminal_exec', arguments: '{"command":"uname -s"}' } }] },
+                { role: 'tool', content: '{"output":"Linux"}' },
+            ] })
+            f.runtime.modelRequests = [{ sessionId: f.runtime.id, body }, { sessionId: 'another-session', body: 'private other session' }]
+            assert.equal(f.dock.contextRequest?.body, body)
+            const messages = f.dock.contextMessages(body)
+            assert.equal(messages.length, 4)
+            assert.equal(messages[0].expanded, false)
+            assert.equal(messages[1].text, 'password=__TABBY_SENSITIVE_1__')
+            assert.match(messages[2].text, /terminal_exec/)
+            assert.equal(messages[3].text, '{"output":"Linux"}')
+            assert.equal(f.dock.contextMessages(body), messages, 'Keep selection stable during unrelated refreshes')
+            assert.deepEqual(JSON.parse(f.dock.contextBody(body)), JSON.parse(body))
+        } finally { f.dock.ngOnDestroy() }
+    })
 }

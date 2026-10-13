@@ -9,6 +9,7 @@ import { SecretRedactor } from '../policy/secret-redactor'
 import { ApprovalMode } from '../config/config-schema'
 
 export interface AISessionRuntime {
+    modelRequests?: { sessionId: string, runId: string, source: string, model: string, body: string, time: string }[]
     id: string
     /** Identifies this live SSH tab, independent of the selected transcript. */
     connectionId: string
@@ -20,7 +21,7 @@ export interface AISessionRuntime {
     activeRunId?: string
     stopAgent?: () => void
     handoffAgent?: () => Promise<void>
-    flushOutput?: () => void
+    flushOutput?: () => Promise<void>
     historyToRestore?: SessionEvent[]
     approvalMode?: ApprovalMode
     shellKind?: string
@@ -107,13 +108,15 @@ export class AISessionService {
 
     detach (tab: SSHTabComponent): void {
         const runtime = this.sessions.get(tab)
-        runtime?.flushOutput?.()
-        if (runtime) { this.store.discardDraft(runtime.id) }
-        runtime?.events.complete()
-        runtime?.liveText.complete()
-        runtime?.state.complete()
-        runtime?.terminal.complete()
         this.sessions.delete(tab)
+        const finish = (): void => {
+            if (runtime) { this.store.discardDraft(runtime.id) }
+            runtime?.events.complete()
+            runtime?.liveText.complete()
+            runtime?.state.complete()
+            runtime?.terminal.complete()
+        }
+        if (runtime?.flushOutput) { void runtime.flushOutput().then(finish) } else { finish() }
     }
 
     get (tab: SSHTabComponent): AISessionRuntime|undefined {
@@ -147,7 +150,7 @@ export class AISessionService {
             throw new Error('这个 Agent 会话已在另一个终端打开，请先切换到该终端')
         }
         runtime.locked = true
-        runtime.flushOutput?.()
+        await runtime.flushOutput?.()
         if (sessionId) { this.loadingContexts.add(sessionId) }
         runtime.state.next('LOADING_CONTEXT')
         try {
@@ -178,8 +181,9 @@ export class AISessionService {
     }
 
     async append<T> (runtime: AISessionRuntime, type: SessionEvent['type'], data: T, runId?: string): Promise<SessionEvent<T>> {
-        runtime.flushOutput?.()
-        return this.appendToContext(runtime, runtime.id, type, data, runId)
+        const id = runtime.id
+        await runtime.flushOutput?.()
+        return this.appendToContext(runtime, id, type, data, runId)
     }
 
     async appendToContext<T> (runtime: AISessionRuntime, id: string, type: SessionEvent['type'], data: T, runId?: string): Promise<SessionEvent<T>> {
@@ -215,7 +219,7 @@ export class AISessionService {
         this.loadingContexts.add(id)
         if (runtime) { runtime.locked = true }
         try {
-            runtime?.flushOutput?.()
+            await runtime?.flushOutput?.()
             await this.store.deleteSession(id)
         } finally {
             if (runtime && this.store.isRetired(id) && this.sessions.get(runtime.tab) === runtime) {

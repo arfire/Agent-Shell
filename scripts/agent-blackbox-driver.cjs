@@ -8,7 +8,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 exports.connect = async () => {
     const info = JSON.parse(fs.readFileSync(path.join(root, '.build-cache/agent-blackbox-current.json'), 'utf8'))
     let target
-    for (let i = 0; i < 100; i++) {
+    for (let i = 0; i < 300; i++) {
         try { target = (await (await fetch('http://127.0.0.1:' + info.debugPort + '/json')).json()).find(t => t.type === 'page'); if (target) break } catch {}
         await delay(200)
     }
@@ -54,6 +54,12 @@ exports.connect = async () => {
         await delay(80)
     }
     const type = async text => { await call('Input.insertText', { text }); await delay(100) }
+    const resize = async (width = null, height = null) => {
+        const control = JSON.parse(fs.readFileSync(path.join(info.directory, 'window-control.json'), 'utf8'))
+        const response = await fetch(`http://127.0.0.1:${control.port}/resize`, { method: 'POST', body: JSON.stringify({ width, height }) })
+        if (!response.ok) throw new Error(await response.text())
+        return response.json()
+    }
     const screenshot = async name => {
         const r = await call('Page.captureScreenshot', { format: 'png' })
         fs.writeFileSync(path.join(info.directory, name + '.png'), Buffer.from(r.data, 'base64'))
@@ -63,5 +69,5 @@ exports.connect = async () => {
         fs.appendFileSync(path.join(info.directory, 'blackbox-checks.jsonl'), JSON.stringify(checks.at(-1)) + '\n')
     }
     await call('Runtime.enable')
-    return { info, call, read, locate, wait, click, key, type, screenshot, report, errors, checks, close:()=>socket.close() }
+    return { info, call, read, locate, wait, click, key, type, resize, screenshot, report, errors, checks, close:()=>socket.close() }
 }

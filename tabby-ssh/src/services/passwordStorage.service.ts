@@ -10,11 +10,16 @@ export const VAULT_SECRET_TYPE_PASSPHRASE = 'ssh:key-passphrase'
 export class PasswordStorageService {
     constructor (private vault: VaultService) { }
 
+    private get portable (): boolean {
+        return !!(process.env.PORTABLE_EXECUTABLE_DIR ?? process.env.TABBY_DATA_DIRECTORY)
+    }
+
     async savePassword (profile: SSHProfile, password: string, username?: string): Promise<void> {
+        if (this.portable) { await this.vault.ensureEnabled() }
         const account = username ?? profile.options.user
         if (this.vault.isEnabled()) {
             const key = this.getVaultKeyForConnection(profile, account)
-            this.vault.addSecret({ type: VAULT_SECRET_TYPE_PASSWORD, key, value: password })
+            await this.vault.addSecret({ type: VAULT_SECRET_TYPE_PASSWORD, key, value: password })
         } else {
             if (!account) {
                 return
@@ -28,8 +33,8 @@ export class PasswordStorageService {
         const account = username ?? profile.options.user
         if (this.vault.isEnabled()) {
             const key = this.getVaultKeyForConnection(profile, account)
-            this.vault.removeSecret(VAULT_SECRET_TYPE_PASSWORD, key)
-        } else {
+            await this.vault.removeSecret(VAULT_SECRET_TYPE_PASSWORD, key)
+        } else if (!this.portable) {
             if (!account) {
                 return
             }
@@ -42,8 +47,12 @@ export class PasswordStorageService {
         const account = username ?? profile.options.user
         if (this.vault.isEnabled()) {
             const key = this.getVaultKeyForConnection(profile, account)
-            return (await this.vault.getSecret(VAULT_SECRET_TYPE_PASSWORD, key))?.value ?? null
-        } else {
+            let saved: Awaited<ReturnType<VaultService['getSecret']>> = null
+            try { saved = await this.vault.getSecret(VAULT_SECRET_TYPE_PASSWORD, key) } catch { return null }
+            return saved?.value || null
+        }
+        if (this.portable) { return null }
+        {
             if (!account) {
                 return null
             }
@@ -58,9 +67,10 @@ export class PasswordStorageService {
     }
 
     async savePrivateKeyPassword (id: string, password: string): Promise<void> {
+        if (this.portable) { await this.vault.ensureEnabled() }
         if (this.vault.isEnabled()) {
             const key = this.getVaultKeyForPrivateKey(id)
-            this.vault.addSecret({ type: VAULT_SECRET_TYPE_PASSPHRASE, key, value: password })
+            await this.vault.addSecret({ type: VAULT_SECRET_TYPE_PASSPHRASE, key, value: password })
         } else {
             const key = this.getKeytarKeyForPrivateKey(id)
             return keytar.setPassword(key, 'user', password)
@@ -70,8 +80,8 @@ export class PasswordStorageService {
     async deletePrivateKeyPassword (id: string): Promise<void> {
         if (this.vault.isEnabled()) {
             const key = this.getVaultKeyForPrivateKey(id)
-            this.vault.removeSecret(VAULT_SECRET_TYPE_PASSPHRASE, key)
-        } else {
+            await this.vault.removeSecret(VAULT_SECRET_TYPE_PASSPHRASE, key)
+        } else if (!this.portable) {
             const key = this.getKeytarKeyForPrivateKey(id)
             await keytar.deletePassword(key, 'user')
         }
@@ -80,11 +90,13 @@ export class PasswordStorageService {
     async loadPrivateKeyPassword (id: string): Promise<string|null> {
         if (this.vault.isEnabled()) {
             const key = this.getVaultKeyForPrivateKey(id)
-            return (await this.vault.getSecret(VAULT_SECRET_TYPE_PASSPHRASE, key))?.value ?? null
-        } else {
-            const key = this.getKeytarKeyForPrivateKey(id)
-            return keytar.getPassword(key, 'user')
+            let saved: Awaited<ReturnType<VaultService['getSecret']>> = null
+            try { saved = await this.vault.getSecret(VAULT_SECRET_TYPE_PASSPHRASE, key) } catch { return null }
+            return saved?.value || null
         }
+        if (this.portable) { return null }
+        const key = this.getKeytarKeyForPrivateKey(id)
+        return keytar.getPassword(key, 'user')
     }
 
     private getKeytarKeyForConnection (profile: SSHProfile): string {

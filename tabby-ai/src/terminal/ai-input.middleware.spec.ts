@@ -1,6 +1,96 @@
 import * as assert from 'node:assert/strict'
 
 export async function runTests (test: (name: string, run: () => Promise<void>) => Promise<void>, fixture: () => Promise<any>): Promise<void> {
+    await test('empty Enter reaches SSH without writing a command history event', async () => {
+        const f = await fixture()
+        try {
+            await f.type('\r')
+            assert.deepEqual(f.sent, ['\r'])
+            assert.deepEqual(f.events, [])
+            assert.deepEqual(f.agent, [])
+        } finally { f.close() }
+    })
+    await test('split SSH output redraws the draft once without inserting an empty row', async () => {
+        const f = await fixture()
+        try {
+            await f.type('正在输入')
+            f.input.feedFromSession(Buffer.from('back'))
+            f.input.feedFromSession(Buffer.from('ground\r'))
+            f.input.feedFromSession(Buffer.from('\n'))
+            await f.input.settled()
+            const buffer = f.frontend.xterm.buffer.active
+            assert.equal(buffer.getLine(0).translateToString(true), '$ background')
+            assert.equal(buffer.getLine(1).translateToString(true), '$ 正在输入')
+            assert.equal(buffer.cursorY, 1)
+            assert.deepEqual(f.sent, [])
+        } finally { f.close() }
+    })
+    await test('SSH chunks preserve order when draft redraw is pending and prompt state changes', async () => {
+        const f = await fixture()
+        try {
+            await f.type('正在输入')
+            const shown: string[] = []
+            f.input.outputToTerminal$.subscribe((data: Buffer) => shown.push(data.toString()))
+            f.input.feedFromSession(Buffer.from('first\r\n'))
+            f.integration.commandStarted()
+            f.input.feedFromSession(Buffer.from('second\r\n'))
+            await f.input.settled()
+            assert.equal(shown.join(''), 'first\r\nsecond\r\n')
+        } finally { f.close() }
+    })
+    await test('right arrows edit local commands instead of leaking terminal status replies to SSH', async () => {
+        for (const key of ['\x1b[C', '\x1bOC', '\x06', '\x1b[1;5C']) {
+            const f = await fixture()
+            try {
+                await f.type('echo abcd')
+                await f.type('\x01')
+                await f.type(key)
+                await f.type('X')
+                assert.deepEqual(f.sent, [], key)
+                f.input.submit('shell'); await f.input.settled()
+                assert.equal(f.sent.join(''), key === '\x1b[1;5C' ? 'echo Xabcd\r' : 'eXcho abcd\r')
+            } finally { f.close() }
+        }
+    })
+    await test('device replies remain case-sensitive while uppercase RGB hex is forwarded', async () => {
+        const f = await fixture()
+        try {
+            const replies = ['\x1b[?1;2c', '\x1b[2;5R', '\x1b]11;rgb:ABCD/EEEE/FFFF\x1b\\']
+            for (const reply of replies) { await f.type(reply) }
+            assert.deepEqual(f.sent, replies)
+            await f.type('\x1b[C')
+            assert.deepEqual(f.sent, replies, 'Right on an empty local line must not reach SSH')
+        } finally { f.close() }
+    })
+    await test('right arrow skips complete wide glyphs and keeps their rendered cursor position', async () => {
+        const f = await fixture()
+        try {
+            await f.type('a'.repeat(37) + '中文Z')
+            await f.type('\x01')
+            for (let i = 0; i < 37; i++) { await f.type('\x1b[C') }
+            const screen = f.frontend.xterm.buffer.active
+            assert.equal(screen.cursorY, 1)
+            assert.equal(screen.cursorX, 0)
+            await f.type('\x1b[C')
+            assert.equal(screen.cursorX, 2)
+            await f.type('新')
+            f.input.submit('shell'); await f.input.settled()
+            assert.equal(f.sent.join(''), 'a'.repeat(37) + '中新文Z\r')
+        } finally { f.close() }
+    })
+    await test('right arrow places the cursor on the next character across a wrapped line', async () => {
+        const f = await fixture()
+        try {
+            await f.type('a'.repeat(37) + 'XYZ')
+            await f.type('\x01')
+            for (let i = 0; i < 38; i++) { await f.type('\x1b[C') }
+            const screen = f.frontend.xterm.buffer.active
+            assert.equal(screen.cursorY, 1)
+            assert.equal(screen.cursorX, 0)
+            assert.equal(screen.getLine(screen.baseY + screen.cursorY).getCell(screen.cursorX).getChars(), 'Y')
+            assert.deepEqual(f.sent, [])
+        } finally { f.close() }
+    })
     await test('Shell keystrokes pass through immediately without repeated remote state notifications', async () => {
         const f = await fixture()
         try {

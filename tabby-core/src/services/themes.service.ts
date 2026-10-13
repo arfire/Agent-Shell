@@ -39,7 +39,7 @@ export class ThemesService {
     }
 
     private getConfigStoreOrDefaults (): any {
-        /// Theme service is active before the vault is unlocked and config is available
+        /// Theme service is active before the config is available
         return this.config.store ?? this.config.getDefaults()
     }
 

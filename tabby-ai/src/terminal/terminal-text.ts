@@ -3,6 +3,8 @@ export class TerminalTextFilter {
     private state: 'text'|'escape'|'csi'|'string'|'string-escape' = 'text'
     private carriageReturn = false
 
+    constructor (private preserveCarriageReturn = false) { }
+
     feed (text: string): string {
         let result = ''
         for (const character of text) {
@@ -42,6 +44,7 @@ export class TerminalTextFilter {
             } else if ('\x90\x98\x9d\x9e\x9f'.includes(character)) {
                 this.state = 'string'
             } else if (character === '\r' || character === '\n') {
+                if (this.preserveCarriageReturn) { result += character; continue }
                 if (character !== '\n' || !this.carriageReturn) {
                     result += '\r\n'
                 }

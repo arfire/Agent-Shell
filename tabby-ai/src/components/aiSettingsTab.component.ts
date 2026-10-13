@@ -1,9 +1,11 @@
 import { Component, HostBinding, OnDestroy } from '@angular/core'
 import { ToastrService } from 'ngx-toastr'
+import { PlatformService } from 'tabby-core'
 
 import { AIConfig, CommandRisk, defaultWebConfig, WebConfig } from '../config/config-schema'
 import { AgentPermissionsService, approvalAction } from '../policy/agent-permissions.service'
 import { CommandPolicyService } from '../policy/command-policy.service'
+import { AIInputDetector } from '../terminal/input-detector'
 import { AIConfigService } from '../config/ai-config.service'
 import { ChatCompletionsClient } from '../llm/chat-completions.client'
 import { ModelCheck, ModelCompatibilityService } from '../llm/model-compatibility.service'
@@ -19,6 +21,7 @@ export class AISettingsTabComponent implements OnDestroy {
 
     model: AIConfig|null = null
     loadError: string|null = null
+    credentialNotice = ''
     saving = false
     testing = false
     loadingModels = false
@@ -31,6 +34,10 @@ export class AISettingsTabComponent implements OnDestroy {
     availableModels: string[] = []
     modelPickerVisible = false
     section = 'model'
+    credentials: { reference: string, description: string }[] = []
+    credentialValues = new Map<string, string>()
+    credentialsLoaded = false
+    credentialsBusy = false
     web: WebConfig = defaultWebConfig()
     webTesting = false
     webResult: { success: boolean, message: string }|null = null
@@ -38,7 +45,8 @@ export class AISettingsTabComponent implements OnDestroy {
     private webRevision = 0
     readonly sections = [
         { id: 'model', label: '模型连接' },
-        { id: 'web', label: '联网搜索' },
+        { id: 'input', label: '命令识别' },
+        { id: 'web', label: '联网搜索' }, { id: 'credentials', label: '凭证' },
         { id: 'policy', label: '执行权限' }, { id: 'redaction', label: '敏感信息' },
     ]
 
@@ -48,6 +56,7 @@ export class AISettingsTabComponent implements OnDestroy {
     ]
 
     shellCommands = ''
+    shellPatterns = ''
     previewCommand = ''
     previewResult = ''
 
@@ -62,7 +71,9 @@ export class AISettingsTabComponent implements OnDestroy {
         private compatibility: ModelCompatibilityService,
         public permissions: AgentPermissionsService,
         private policy: CommandPolicyService,
+        private detector: AIInputDetector,
         private webService: WebService,
+        private platform: PlatformService,
     ) {
         void this.load()
     }
@@ -103,6 +114,7 @@ export class AISettingsTabComponent implements OnDestroy {
     }
 
     ngOnDestroy (): void {
+        this.credentialValues.clear()
         this.destroyed = true
         this.cancelCheck()
         this.cancelWebCheck()
@@ -197,13 +209,39 @@ export class AISettingsTabComponent implements OnDestroy {
             this.syncCommands()
             if (!await this.permissions.confirmMode(this.model.policy.approvalMode ?? 'configured')) { return }
             await this.configService.save(this.model)
+            this.model = JSON.parse(JSON.stringify(this.configService.config))
+            this.prepareModel()
             this.loadError = null
+            this.credentialNotice = ''
             this.toastr.success('已保存，后续请求和命令使用新配置。', 'AI 设置')
         } catch (error) {
             this.toastr.error(String(error), 'Could not save AI configuration')
         } finally {
             this.saving = false
         }
+    }
+
+    async loadCredentials (): Promise<void> {
+        if (this.credentialsBusy) { return }
+        this.credentialsBusy = true
+        try {
+            this.credentials = await this.configService.listAgentCredentials()
+            this.credentialsLoaded = true
+        } catch { this.toastr.error('未能读取本地凭据，请检查数据文件。') } finally { this.credentialsBusy = false }
+    }
+
+    async showCredential (reference: string): Promise<void> {
+        if (this.credentialValues.has(reference)) { this.credentialValues.delete(reference); return }
+        try { this.credentialValues.set(reference, await this.configService.loadAgentCredential(reference)) } catch {
+            this.toastr.error('无法读取本地凭据，请检查数据文件。')
+        }
+    }
+
+    async copyCredential (reference: string): Promise<void> {
+        try {
+            this.platform.setClipboard({ text: await this.configService.loadAgentCredential(reference) })
+            this.toastr.success('已复制凭证')
+        } catch { this.toastr.error('无法复制本地凭据，请检查数据文件。') }
     }
 
     markChanged (): void {
@@ -225,10 +263,11 @@ export class AISettingsTabComponent implements OnDestroy {
         if (!this.model || !this.previewCommand.trim()) { this.previewResult = ''; return }
         this.syncCommands()
         try {
+            const shell = this.detector.isShellCommand(this.previewCommand, undefined, this.model.inputDetection)
             const decision = this.policy.evaluate(this.previewCommand, undefined, this.model.policy)
             const action = approvalAction(decision.risk, this.model.policy.approvalMode ?? 'configured')
             const label = { execute: '自动执行', ask: decision.risk === 'DANGEROUS' ? '二次确认' : '需要审批', deny: '拦截' }[action]
-            this.previewResult = `Agent 执行此命令：${label}。`
+            this.previewResult = `自动识别：${shell ? 'Shell' : 'Agent'}；若由 Agent 执行：${label}。`
         } catch (error) { this.previewResult = String(error) }
     }
 
@@ -258,6 +297,7 @@ export class AISettingsTabComponent implements OnDestroy {
     private syncCommands (): void {
         if (this.model) {
             this.model.inputDetection.shellCommands = [...new Set(this.shellCommands.split(/\r?\n/).map(x => x.trim()).filter(Boolean))]
+            this.model.inputDetection.shellPatterns = this.shellPatterns.split(/\r?\n/).filter(x => x.trim())
         }
     }
 
@@ -268,11 +308,16 @@ export class AISettingsTabComponent implements OnDestroy {
         this.model.policy.approvalMode ??= 'configured'
         this.model.policy.commandRules ??= []
         this.shellCommands = this.model.inputDetection.shellCommands.join('\n')
+        this.shellPatterns = this.model.inputDetection.shellPatterns.join('\n')
     }
 
     private async load (): Promise<void> {
         await this.configService.ready
-        this.model = JSON.parse(JSON.stringify(this.configService.config))
+        const model = JSON.parse(JSON.stringify(this.configService.config)) as AIConfig
+        const missing = await this.configService.clearUnavailableReferences(model)
+        if (this.destroyed) { return }
+        this.credentialNotice = missing.length ? `${missing.join('、')} 无法读取，请重新填写后保存。` : ''
+        this.model = model
         this.loadError = this.configService.loadError
         this.prepareModel()
     }

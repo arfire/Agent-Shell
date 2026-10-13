@@ -3,13 +3,15 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as yaml from 'js-yaml'
 import * as remote from '@electron/remote'
-import { LogService, Logger } from 'tabby-core'
+import { ConfigService, LogService, Logger, VaultService } from 'tabby-core'
+import { randomUUID } from 'crypto'
 import { Subject } from 'rxjs'
 
 import { AIConfig, validateAIConfig } from './config-schema'
 
 @Injectable({ providedIn: 'root' })
 export class AIConfigService {
+    readonly knownSecrets = new Set<string>()
     readonly directory: string
     readonly configPath: string
     readonly defaultConfigPath: string
@@ -23,7 +25,9 @@ export class AIConfigService {
     private defaults: AIConfig
     private writes = Promise.resolve()
 
-    constructor (log: LogService) {
+    constructor (log: LogService, public vault: VaultService, coreConfig: ConfigService) {
+        // Ensure the existing vault's persistence callback is installed.
+        void coreConfig
         this.logger = log.create('aiConfig')
         this.directory = path.join(remote.app.getPath('userData'), 'tabby-ai')
         this.configPath = path.join(this.directory, 'config.yaml')
@@ -35,6 +39,15 @@ export class AIConfigService {
         validateAIConfig(config)
         const snapshot = JSON.parse(JSON.stringify(config)) as AIConfig
         const write = this.writes.catch(() => undefined).then(async () => {
+            for (const [object, key, label] of this.credentialFields(snapshot)) {
+                const value = object[key]
+                if (!value || this.isCredentialReference(value)) { continue }
+                await this.vault.ensureEnabled()
+                const id = randomUUID()
+                await this.vault.addSecret({ type: 'ai:credential', key: { id, description: label }, value })
+                this.knownSecrets.add(value)
+                object[key] = `ash-vault:${id}`
+            }
             await fs.promises.mkdir(this.directory, { recursive: true })
             const temporaryPath = `${this.configPath}.tmp`
             await fs.promises.writeFile(temporaryPath, yaml.dump(snapshot, { noRefs: true, lineWidth: 120 }), 'utf8')
@@ -45,6 +58,70 @@ export class AIConfigService {
         })
         this.writes = write
         await write
+    }
+
+    isCredentialReference (value: string): boolean {
+        return value.startsWith('ash-vault:')
+    }
+
+    async protectStoredCredentials (): Promise<void> {
+        await this.ready
+        if (this.credentialFields(this.config).some(([object, key]) => object[key] && !this.isCredentialReference(object[key]))) {
+            await this.save(this.config)
+        }
+    }
+
+    async clearUnavailableReferences (config: AIConfig): Promise<string[]> {
+        const missing: string[] = []
+        for (const [object, key, label] of this.credentialFields(config)) {
+            if (!this.isCredentialReference(object[key] ?? '')) { continue }
+            try { await this.resolveSecret(object[key]) } catch {
+                object[key] = ''
+                missing.push(label)
+            }
+        }
+        return missing
+    }
+
+    async resolveSecret (value: string): Promise<string> {
+        if (!this.isCredentialReference(value)) { return value }
+        const secret = await this.vault.getSecret('ai:credential', { id: value.substring('ash-vault:'.length) })
+        if (!secret) { throw new Error('已保存的凭证不存在，请在设置中重新填写') }
+        this.knownSecrets.add(secret.value)
+        return secret.value
+    }
+
+    async saveAgentCredential (value: string, description: string): Promise<string> {
+        await this.vault.ensureEnabled()
+        const id = randomUUID()
+        await this.vault.addSecret({ type: 'ai:agent-credential', key: { id, description }, value })
+        this.knownSecrets.add(value)
+        return `ash-vault:${id}`
+    }
+
+    async loadAgentCredential (reference: string): Promise<string> {
+        const secret = await this.vault.getSecret('ai:agent-credential', { id: reference.replace(/^ash-vault:/, '') })
+        if (!secret) { throw new Error('凭证已不存在，请重新输入') }
+        this.knownSecrets.add(secret.value)
+        return secret.value
+    }
+
+    async listAgentCredentials (): Promise<{ reference: string, description: string }[]> {
+        const contents = await this.vault.load()
+        return (contents?.secrets ?? []).filter(secret => secret.type === 'ai:agent-credential').map(secret => ({
+            reference: `ash-vault:${(secret.key as { id: string }).id}`,
+            description: (secret.key as { description: string }).description,
+        }))
+    }
+
+    private credentialFields (config: AIConfig): [Record<string, any>, string, string][] {
+        return [
+            [config.llm, 'apiKey', 'Agent 模型 API Key'],
+            ...config.web ? [
+                [config.web.model, 'apiKey', '联网模型 API Key'],
+                [config.web, 'authorization', '搜索服务认证'],
+            ] as [Record<string, any>, string, string][] : [],
+        ]
     }
 
     async getDefaults (): Promise<AIConfig> {

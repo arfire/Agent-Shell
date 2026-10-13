@@ -15,7 +15,6 @@ import { SettingsTabComponent } from './components/settingsTab.component'
 import { SettingsTabBodyComponent } from './components/settingsTabBody.component'
 import { WindowSettingsTabComponent } from './components/windowSettingsTab.component'
 import { VaultSettingsTabComponent }  from './components/vaultSettingsTab.component'
-import { SetVaultPassphraseModalComponent } from './components/setVaultPassphraseModal.component'
 import { ProfilesSettingsTabComponent } from './components/profilesSettingsTab.component'
 import { ReleaseNotesComponent } from './components/releaseNotesTab.component'
 import { ConfigSyncSettingsTabComponent } from './components/configSyncSettingsTab.component'
@@ -57,7 +56,6 @@ import { HotkeySettingsTabProvider, WindowSettingsTabProvider, VaultSettingsTabP
         ProfilesSettingsTabComponent,
         SettingsTabComponent,
         SettingsTabBodyComponent,
-        SetVaultPassphraseModalComponent,
         VaultSettingsTabComponent,
         WindowSettingsTabComponent,
         ConfigSyncSettingsTabComponent,

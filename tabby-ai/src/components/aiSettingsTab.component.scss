@@ -95,3 +95,18 @@
     strong { flex: 0 0 6rem; }
     span { overflow-wrap: anywhere; }
 }
+
+.credentials-section { max-width: 760px; }
+.credential-row { display: flex; align-items: flex-start; gap: 16px; padding: 16px 0; border-bottom: 1px solid rgba(128, 128, 128, .2); }
+.credential-content { flex: 1; min-width: 0; }
+.credential-content strong { display: block; overflow-wrap: anywhere; }
+.credential-content code { display: block; margin-top: 8px; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere; color: inherit; background: rgba(128, 128, 128, .08); user-select: text; }
+.credential-actions {
+    display: flex;
+    gap: 8px;
+    .btn { color: inherit; }
+}
+.credentials-section .btn:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+@media (max-width: 600px) { .credential-row { flex-direction: column; gap: 8px; } }
+:host .permission-full { color: #e99645; }
+:host .permission-unrestricted { color: #f16d6d; }

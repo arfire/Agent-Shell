@@ -711,13 +711,13 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
                     event.stopPropagation()
                     return
                 }
-                if (event.which === 3 || event.which === 1 && event.ctrlKey) {
+                if (event.which === 3 || this.hostApp.platform === Platform.macOS && event.which === 1 && event.ctrlKey) {
                     this.handleRightMouseDown(event)
                     return
                 }
             }
             if (event.type === 'mouseup') {
-                if (event.which === 3 || event.which === 1 && event.ctrlKey) {
+                if (event.which === 3 || this.hostApp.platform === Platform.macOS && event.which === 1 && event.ctrlKey) {
                     this.handleRightMouseUp(event)
                     return
                 }

@@ -1,7 +1,7 @@
 import { Injectable } from '@angular/core'
 import { AIConfigService } from '../config/ai-config.service'
 import { defaultWebConfig, validateWebConfig, WebConfig } from '../config/config-schema'
-import { ChatCompletionsClient, ChatMessage, ChatTool, ToolCall } from '../llm/chat-completions.client'
+import { ChatCompletionsClient, ChatMessage, ChatTool, StreamHandlers, ToolCall } from '../llm/chat-completions.client'
 import { cleanWebText, extractWebContent } from './web-content'
 import { requestWeb, webURL } from './web-http'
 
@@ -32,6 +32,7 @@ export const WEB_TOOLS: ChatTool[] = [{
 }]
 
 export interface WebRunState {
+    onRequest?: StreamHandlers['onRequest']
     input: string
     calls: number
     remainingChars: number
@@ -111,7 +112,7 @@ export class WebService {
                 this.checkAllowed(state)
                 signal.throwIfAborted()
                 const canRead = step < 3 && state.calls < settings.maxCallsPerRun && state.remainingChars - summaryReserve >= 2000
-                const result = await this.client.stream(messages, canRead ? WEB_TOOLS : [], {}, signal, settings.model)
+                const result = await this.client.stream(messages, canRead ? WEB_TOOLS : [], { onRequest: state.onRequest }, signal, settings.model)
                 if (!result.toolCalls.length) {
                     if (!result.content.trim()) { throw new Error('独立联网模型未返回资料总结') }
                     const report = {
@@ -224,7 +225,8 @@ export class WebService {
         if (language && language.toLowerCase() !== 'auto') { endpoint.searchParams.set('language', language) }
         if (settings.engines.length) { endpoint.searchParams.set('engines', settings.engines.join(',')) }
         if (args.time_range) { endpoint.searchParams.set('time_range', String(args.time_range)) }
-        const response = await requestWeb(endpoint.href, settings.timeoutMs, signal, true, settings.authorization)
+        const authorization = await this.config.resolveSecret(settings.authorization)
+        const response = await requestWeb(endpoint.href, settings.timeoutMs, signal, true, authorization)
         if (response.status === 403) { throw new Error('搜索接口返回 403：请检查 JSON 格式是否启用，以及反向代理认证或访问限制') }
         if (response.status !== 200) { throw new Error(`搜索接口返回 HTTP ${response.status}`) }
         let data: any = null

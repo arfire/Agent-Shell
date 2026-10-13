@@ -18,6 +18,9 @@ function redactCredentials (content: string): string {
     const result = plain
         .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, '[REDACTED_PRIVATE_KEY]')
         .replace(/(["']?([\w.-]*(?:password|passwd|token|secret|api[_-]?key|access[_-]?key|private[_-]?key|connection[_-]?string|database_url|mysql_pwd|pgpassword)[\w.-]*)["']?\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s,}\r\n]+)/gi, (match, prefix: string, key: string, value: string) => {
+            // A quoted search pattern such as grep "Password:" ends at the
+            // quote after the colon; it is not a credential assignment.
+            if (/^["'][^"']+[=:]\s*$/.test(prefix) && value.startsWith(prefix[0])) { return match }
             if (!SECRET_FIELD.test(key) || /__TABBY_SENSITIVE_\d+__|\[REDACTED/.test(value)) { return match }
             if (/^password$/i.test(key) && /^(?:YES|NO)\)?$/i.test(value) && /using password:/i.test(content)) { return match }
             return prefix + '[REDACTED]'
@@ -34,6 +37,8 @@ export class SecretRedactionScope {
     private values = new Map<string, string>()
 
     constructor (private redactor: SecretRedactor, private allowSensitiveContent: () => boolean = () => false) { }
+
+    clear (): void { this.values.clear() }
 
     protect (content: string): string {
         let result = this.replaceKnown(content)
@@ -58,7 +63,7 @@ export class SecretRedactionScope {
             if (this.allowSensitiveContent()) { return this.replaceKnown(text) }
             if (!bufferLines) { return this.redactKnown(text) }
             let visible = ''
-            for (const line of text.match(/[^\n]*\n|[^\n]+$/g) ?? []) {
+            for (const line of text.match(/[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+$/g) ?? []) {
                 const plain = line.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
                 if (secretQuote) {
                     if (plain.includes(secretQuote)) { secretQuote = '' }
@@ -89,7 +94,7 @@ export class SecretRedactionScope {
                 }
             }
             let cutoff = pending.length - retained
-            if (bufferLines) { cutoff = pending.lastIndexOf('\n', cutoff - 1) + 1 }
+            if (bufferLines) { cutoff = Math.max(pending.lastIndexOf('\n', cutoff - 1), pending.lastIndexOf('\r', cutoff - 1)) + 1 }
             for (const value of this.values.values()) {
                 const start = pending.lastIndexOf(value, cutoff - 1)
                 if (start >= 0 && start < cutoff && start + value.length > cutoff) { cutoff = start }
@@ -171,7 +176,7 @@ export class SecretRedactor {
     redact (content: string): string {
         const config = this.configService.config.redaction
         const web = this.configService.config.web
-        for (const secret of [this.configService.config.llm.apiKey, web?.model.apiKey, web?.authorization,
+        for (const secret of [...this.configService.knownSecrets, this.configService.config.llm.apiKey, web?.model.apiKey, web?.authorization,
             web?.authorization.replace(/^(?:Bearer|Basic)\s+/i, '')]) {
             if (secret) { content = content.split(secret).join('[REDACTED]') }
         }

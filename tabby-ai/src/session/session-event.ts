@@ -6,6 +6,7 @@ export type SessionEventType =
     'ai-message' |
     'ai-command' |
     'command-result' |
+    'model-output' |
     'web-activity' |
     'approval' |
     'interaction' |

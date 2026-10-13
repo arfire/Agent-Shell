@@ -2,6 +2,7 @@ h3 AI
 .alert.alert-warning(*ngIf='loadError')
     strong AI 配置加载失败，当前使用默认配置。
     div {{ loadError }}
+.alert.alert-warning(*ngIf='credentialNotice', role='status') {{ credentialNotice }}
 .ai-settings-tabs(role='tablist')
     button.btn.btn-sm(*ngFor='let item of sections', type='button', role='tab', [class.active]='section === item.id', [attr.aria-selected]='section === item.id', (click)='section = item.id') {{ item.label }}
 ng-container(*ngIf='model')
@@ -15,6 +16,7 @@ ng-container(*ngIf='model')
             .header
                 .title API Key
             input.form-control(type='password', [(ngModel)]='model.llm.apiKey', (ngModelChange)='markChanged()', autocomplete='off')
+        p.setting-help {{configService.isCredentialReference(model.llm.apiKey) ? '已在本地保存。输入新密钥即可替换，使用时自动读取，无需主密码。' : '密钥保存在本地数据目录，自动读取，不写入系统凭证管理器。'}}
 
         .form-line
             .header
@@ -81,6 +83,22 @@ ng-container(*ngIf='model')
                 strong {{check.label}}
                 span {{check.state === 'pending' ? '等待检查' : check.state === 'running' ? '检查中…' : check.message}}
         .alert.mt-2(*ngIf='connectionResult', [class.alert-success]='connectionResult.success', [class.alert-danger]='!connectionResult.success') {{ connectionResult.message }}
+    .settings-section(*ngIf='section === "input"')
+        p.setting-help 在终端直接输入：Shell 命令交给终端，自然语言交给 Agent。识别在本地完成。
+        label(for='ai-shell-commands') Shell 命令名
+        p.setting-help 每行一个，例如 docker、git。列表中的命令会直接交给 Shell。
+        textarea#ai-shell-commands.form-control.command-list(rows='10', [(ngModel)]='shellCommands', spellcheck='false')
+        label(for='ai-shell-patterns') Shell 正则规则
+        p.setting-help 每行一条 JavaScript 正则表达式，不加两侧斜杠。用于补充命令识别；明确的自然语言仍交给 Agent。
+        textarea#ai-shell-patterns.form-control.command-list(rows='6', [(ngModel)]='shellPatterns', spellcheck='false')
+        .form-line
+            .header
+                .title 强制发送 Agent 快捷键
+            input.form-control(type='text', [(ngModel)]='model.inputDetection.forceAgentShortcut', placeholder='Shift+Enter', aria-label='强制发送 Agent 快捷键')
+        .form-line
+            .header
+                .title 强制发送 Shell 快捷键
+            input.form-control(type='text', [(ngModel)]='model.inputDetection.forceShellShortcut', placeholder='Ctrl+Enter', aria-label='强制发送 Shell 快捷键')
     .settings-section(*ngIf='section === "web"')
         .form-line
             .header
@@ -157,10 +175,10 @@ ng-container(*ngIf='model')
                 input.form-control(type='number', min='1000', max='30000', step='1000', [(ngModel)]='web.maxPageChars', (ngModelChange)='markWebChanged()', aria-label='正文字符上限')
     .settings-section(*ngIf='section === "policy"')
         label(for='ai-approval-mode') 默认执行权限
-        select#ai-approval-mode.form-select([(ngModel)]='model.policy.approvalMode')
+        select#ai-approval-mode.form-select([(ngModel)]='model.policy.approvalMode', [class.permission-full]='model.policy.approvalMode === "full"', [class.permission-unrestricted]='model.policy.approvalMode === "unrestricted"')
             option(*ngFor='let mode of permissions.modes', [value]='mode.value') {{ mode.label }}
         ng-container(*ngFor='let mode of permissions.modes')
-            p.setting-help(*ngIf='model.policy.approvalMode === mode.value', [class.text-warning]='mode.value === "full" || mode.value === "unrestricted"') {{ mode.description }}
+            p.setting-help(*ngIf='model.policy.approvalMode === mode.value', [class.permission-full]='mode.value === "full"', [class.permission-unrestricted]='mode.value === "unrestricted"') {{ mode.description }}
         .form-line
             .header
                 .title 未匹配命令的风险
@@ -182,20 +200,33 @@ ng-container(*ngIf='model')
         label.toggle-row
             input(type='checkbox', [(ngModel)]='model.redaction.enabled')
             span 启用额外脱敏规则
-        p.setting-help 密码、密钥等核心凭据始终脱敏；Agent 凭据访问限制在所有执行权限下生效。
+        p.setting-help 普通模式会隐藏已识别的凭据；“放手一搏”按所选权限放开。识别规则无法覆盖所有秘密，可在模型上下文中审查实际请求。
         p.text-muted 在内容发送给模型和写入会话记录前替换匹配的敏感信息。
         label.toggle-row(*ngFor='let rule of model.redaction.patterns')
             input(type='checkbox', [ngModel]='rule.enabled !== false', (ngModelChange)='rule.enabled = $event', [disabled]='!model.redaction.enabled')
             span {{ rule.name }}
         p.setting-help 密码和 Token 的临时输入、占位符及本地恢复继续独立保留。
-    .command-preview(*ngIf='section === "policy"')
+    .command-preview(*ngIf='section === "input" || section === "policy"')
         label(for='ai-command-preview') 试一下规则
         .input-group
             input#ai-command-preview.form-control(type='text', [(ngModel)]='previewCommand', placeholder='输入一条命令，不会实际执行')
             button.btn.btn-outline-secondary(type='button', (click)='preview()') 检查
         p.setting-help(*ngIf='previewResult', role='status') {{ previewResult }}
         small.text-muted 预览使用通用 Shell 语法；实际执行会结合当前 Shell 检查。
-    .settings-actions
+    .settings-section.credentials-section(*ngIf='section === "credentials"')
+        h4 已保存的凭证
+        p.setting-help 查看本地已保存的凭据。Agent 业务密码仅在当前任务内使用，不自动保存。
+        button.btn.btn-outline-secondary(type='button', (click)='loadCredentials()', [disabled]='credentialsBusy') {{credentialsBusy ? '正在读取…' : credentialsLoaded ? '刷新凭证' : '解锁并查看'}}
+        p.setting-help(*ngIf='credentialsLoaded && !credentials.length') 没有以前保存的 Agent 凭证。任务需要密码时会通过表单向你索取。
+        .credential-row(*ngFor='let credential of credentials')
+            .credential-content
+                strong {{credential.description}}
+                code(*ngIf='credentialValues.get(credential.reference) as value') {{value}}
+            .credential-actions
+                button.btn.btn-sm.btn-link(type='button', (click)='showCredential(credential.reference)') {{credentialValues.has(credential.reference) ? '隐藏' : '查看'}}
+                button.btn.btn-sm.btn-outline-secondary(type='button', (click)='copyCredential(credential.reference)') 复制
+        p.setting-help.mt-3 SSH 密码和模型 API Key 可在设置的“保险库”中管理，无需主密码。移动软件时，请一并保留 data 目录。
+    .settings-actions(*ngIf='section !== "credentials"')
         button.btn.btn-primary(type='button', (click)='save()', [disabled]='saving') {{ saving ? '保存中…' : '保存' }}
         button.btn.btn-outline-secondary(type='button', (click)='restoreDefaults()', [disabled]='saving') 恢复本页默认
         span.text-muted 保存后生效

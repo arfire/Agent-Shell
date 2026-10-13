@@ -1,4 +1,4 @@
-import { AfterViewChecked, ChangeDetectorRef, Component, ElementRef, Input, NgZone, OnDestroy, OnInit, ViewChild } from '@angular/core'
+import { ChangeDetectorRef, Component, ElementRef, HostBinding, Input, NgZone, OnDestroy, OnInit, ViewChild } from '@angular/core'
 import { from, Subscription } from 'rxjs'
 
 import { AISessionRuntime } from '../session/ai-session.service'
@@ -7,18 +7,19 @@ import { TerminalControllerService } from '../terminal/terminal-controller.servi
 import { ApprovalMode } from '../config/config-schema'
 import { AgentPermissionsService } from '../policy/agent-permissions.service'
 import { AISessionStore } from '../session/session-store'
-import { historyChunks } from '../terminal/session-history'
-import { terminalText } from '../terminal/terminal-text'
-import { TerminalHistoryFilter } from '../terminal/terminal-history-filter'
-import { SessionEvent } from '../session/session-event'
+import { commandRiskDescription } from '../policy/command-description'
+
+interface ContextMessage { label: string, text: string, expanded: boolean }
+interface ContextPreview { formatted: string, protectedCount: number, messages: ContextMessage[] }
 
 @Component({
     selector: 'ash-agent-dock',
     templateUrl: './agent-dock.component.pug',
     styleUrls: ['./agent-dock.component.scss'],
 })
-export class AgentDockComponent implements OnInit, OnDestroy, AfterViewChecked {
+export class AgentDockComponent implements OnInit, OnDestroy {
     @Input() runtime: AISessionRuntime
+    @HostBinding('class.awaiting-input') get awaitingInput (): boolean { return !!(this.requests.length || this.forms.length) }
     requests: ApprovalRequest[] = []
     forms: FormRequest[] = []
     commands = new Map<string, string>()
@@ -27,18 +28,11 @@ export class AgentDockComponent implements OnInit, OnDestroy, AfterViewChecked {
     changingPermission = false
     showFailure = false
     configReady = false
-    draft = ''
-    transcript = ''
-    showTranscript = true
-    @ViewChild('transcriptView') transcriptView?: ElementRef<HTMLElement>
-    followOutput = true
-    private scrollPending = false
-    private historyOutput = new TerminalHistoryFilter()
-    private historyText = ''
-    private historyContext = ''
-    private historyCount = 0
-    private historyLast?: SessionEvent
+    showContext = false
+    @ViewChild('contextToggle') contextToggle?: ElementRef<HTMLButtonElement>
+    @ViewChild('contextPanel') contextPanel?: ElementRef<HTMLElement>
     private subscriptions: Subscription[] = []
+    private contextCache = new Map<string, ContextPreview>()
 
     constructor (
         public terminal: TerminalControllerService,
@@ -50,24 +44,7 @@ export class AgentDockComponent implements OnInit, OnDestroy, AfterViewChecked {
     ) { }
 
     ngOnInit (): void {
-        this.subscriptions.push(this.runtime.events.subscribe(events => {
-            if (this.historyContext !== this.runtime.id || events.length < this.historyCount ||
-                this.historyCount > 0 && events[this.historyCount - 1] !== this.historyLast) {
-                this.historyOutput = new TerminalHistoryFilter()
-                this.historyText = ''
-                this.historyCount = 0
-                this.historyContext = this.runtime.id
-            }
-            for (const chunk of historyChunks(events.slice(this.historyCount), this.historyOutput, false)) {
-                this.historyText = (this.historyText + chunk).slice(-200000)
-            }
-            this.historyCount = events.length
-            this.historyLast = events.at(-1)
-            this.transcript = terminalText(this.historyText + this.historyOutput.peek()).trim()
-            this.scrollPending = true
-            this.refresh()
-        }))
-        this.subscriptions.push(this.runtime.liveText.subscribe(() => { this.scrollPending = true; this.refresh() }))
+        this.subscriptions.push(this.runtime.events.subscribe(() => this.refresh()))
         this.subscriptions.push(
             from(this.permissions.config.ready).subscribe(() => {
                 this.configReady = true
@@ -86,35 +63,69 @@ export class AgentDockComponent implements OnInit, OnDestroy, AfterViewChecked {
         this.values.clear()
         this.commands.clear()
         this.confirmed.clear()
+        this.contextCache.clear()
+        this.runtime.tab.element?.nativeElement.style.removeProperty('--ash-context-width')
     }
 
-    send (): void {
-        if (this.terminal.sendRequest(this.runtime, this.draft)) {
-            this.draft = ''
-            this.showTranscript = true
-            this.followOutput = true
-            this.scrollPending = true
+    toggleContext (): void {
+        this.showContext = !this.showContext
+        this.runtime.tab.element.nativeElement.style.setProperty('--ash-context-width', this.showContext ? 'min(420px, 45%)' : '0px')
+        setTimeout(() => {
+            if (this.showContext) { this.contextPanel?.nativeElement.focus() } else { this.contextToggle?.nativeElement.focus() }
+        })
+    }
+
+    get contextRequest (): NonNullable<AISessionRuntime['modelRequests']>[number]|undefined {
+        return this.runtime.modelRequests?.filter(request => request.sessionId === this.runtime.id).at(-1)
+    }
+
+    contextMessages (body: string): ContextMessage[] {
+        return this.cachedContext(body).messages
+    }
+
+    contextBody (body: string): string {
+        return this.cachedContext(body).formatted
+    }
+
+    protectedFields (body: string): number {
+        return this.cachedContext(body).protectedCount
+    }
+
+    private cachedContext (body: string): ContextPreview {
+        let cached = this.contextCache.get(body)
+        if (!cached) {
+            let formatted = body
+            let messages: ContextMessage[] = []
+            try {
+                const request = JSON.parse(body)
+                formatted = JSON.stringify(request, null, 2)
+                if (Array.isArray(request.messages)) {
+                    messages = request.messages.map(message => ({
+                        label: { system: '系统指令与历史', user: '你的输入', assistant: 'Agent', tool: '工具结果' }[message.role] ?? String(message.role),
+                        expanded: message.role !== 'system',
+                        text: [typeof message.content === 'string' ? message.content : message.content ? JSON.stringify(message.content, null, 2) : '',
+                            Array.isArray(message.tool_calls) ? message.tool_calls.map(call => {
+                                let argumentsText = String(call.function?.arguments ?? '')
+                                try { argumentsText = JSON.stringify(JSON.parse(argumentsText), null, 2) } catch { /* Preserve incomplete arguments. */ }
+                                return `${call.function?.name ?? '工具调用'}\n${argumentsText}`
+                            }).join('\n\n') : ''].filter(Boolean).join('\n'),
+                    }))
+                }
+            } catch { /* Keep the submitted text in the complete request view. */ }
+            cached = { formatted, messages, protectedCount: (body.match(/__TABBY_SENSITIVE_\d+__|\[REDACTED[^\]]*\]/g) ?? []).length }
+            if (this.contextCache.size >= 5) { this.contextCache.delete(this.contextCache.keys().next().value) }
+            this.contextCache.set(body, cached)
         }
+        return cached
     }
 
-    ngAfterViewChecked (): void {
-        const element = this.transcriptView?.nativeElement
-        if (element && this.scrollPending) {
-            this.scrollPending = false
-            if (this.followOutput) { element.scrollTop = element.scrollHeight }
-        }
+    requestRisk (request: ApprovalRequest): string {
+        return commandRiskDescription(this.commands.get(request.id) ?? request.command, request.risk)
     }
 
-    transcriptScrolled (): void {
-        const element = this.transcriptView?.nativeElement
-        if (element) { this.followOutput = element.scrollHeight - element.scrollTop - element.clientHeight < 24 }
-    }
-
-    composerKey (event: KeyboardEvent): void {
-        if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
-            event.preventDefault()
-            this.send()
-        }
+    generateCredential (id: string): void {
+        const bytes = crypto.getRandomValues(new Uint8Array(32))
+        this.values.set(id, Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join(''))
     }
 
     private refresh (): void {
@@ -177,7 +188,7 @@ export class AgentDockComponent implements OnInit, OnDestroy, AfterViewChecked {
         this.runtime.tab.frontend?.focus()
     }
 
-    submitForm (form: FormRequest, submitted = true): void {
+    async submitForm (form: FormRequest, submitted = true): Promise<void> {
         if (!this.owns(form) || !this.forms.includes(form)) { this.values.delete(form.id); return }
         const value = submitted ? this.values.get(form.id) ?? '' : ''
         this.values.delete(form.id)
@@ -187,6 +198,11 @@ export class AgentDockComponent implements OnInit, OnDestroy, AfterViewChecked {
 
     async toggleMode (): Promise<void> {
         await this.terminal.setMode(this.runtime, this.runtime.terminal.value.mode === 'agent' ? 'shell' : 'agent')
+        this.runtime.tab.frontend?.focus()
+    }
+
+    stopAgent (): void {
+        this.runtime.stopAgent?.()
         this.runtime.tab.frontend?.focus()
     }
 

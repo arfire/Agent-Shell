@@ -32,7 +32,6 @@ export class WorkspaceFilesComponent implements OnDestroy {
     private subscriptions = new Subscription()
     private timer?: ReturnType<typeof setInterval>
     private generation = 0
-    private following = false
 
     @Input() set tab (tab: BaseTabComponent|null) {
         const sshTab = tab instanceof SSHTabComponent ? tab : null
@@ -84,15 +83,16 @@ export class WorkspaceFilesComponent implements OnDestroy {
     }
 
     async jump (): Promise<void> {
-        if (!this.directory || !this.sshTab || this.following) { return }
+        if (!this.directory || !this.sshTab) { return }
         const panel = this.panel
         if (!panel?.sftp || panel.session !== this.sshTab.sshSession) {
             this.sshTab.sftpPath = this.directory
             return
         }
-        if (panel.path === this.directory) { return }
-        this.following = true
-        try { await panel.navigate(this.directory) } finally { this.following = false }
+        if (panel.path === this.directory && panel.loadingPath === null) { return }
+        // navigate discards stale listings. Always send the latest directory,
+        // including a return to the current path while another path is loading.
+        await panel.navigate(this.directory)
     }
 
     ngOnDestroy (): void {
