@@ -1,6 +1,24 @@
 import { ApprovalMode } from '../config/config-schema'
+import { literalArguments } from './secret-binding'
 
-/** Mandatory in the first three tiers; unrestricted is an explicit user opt-out. */
+/** Only a literal detached startup may consume an existing dotenv file. */
+export function opaqueConfigurationCommand (command: string): boolean {
+    const args = literalArguments(command.trim())
+    if (!args || args[0] !== 'docker' || args[1] !== 'compose') { return false }
+    let index = 2
+    const seen = new Set<string>()
+    while (['--project-directory', '--env-file'].includes(args[index])) {
+        const option = args[index++]
+        const value = args[index++]
+        if (seen.has(option) || !value || /[\x00-\x1f?*\[\]$`]/.test(value) || value.startsWith('-') || value.split('/').includes('..')) { return false }
+        if (value.split('/').some(segment => /^\.(?:ssh|aws|azure|kube|docker|gnupg)$/.test(segment))) { return false }
+        if (option === '--env-file' && !/(?:^|\/)(?:\.env(?:\.[\w-]+)?|[\w-]+\.env)$/.test(value)) { return false }
+        seen.add(option)
+    }
+    return args[index] === 'up' && args[index + 1] === '-d' && args.length === index + 2
+}
+
+/** Credential privacy applies to the three restricted permission tiers. */
 export function credentialAccessReason (command: string, mode: ApprovalMode = 'configured'): string|undefined {
     if (mode === 'unrestricted') { return undefined }
     // Also inspect quoted fragments and escaped paths inside shell/interpreter wrappers.
@@ -9,6 +27,21 @@ export function credentialAccessReason (command: string, mode: ApprovalMode = 'c
     if (/__TABBY_SENSITIVE_\d+__/.test(command) && /\b(?:sh|bash|zsh|fish|pwsh|powershell|python\d*|node|perl|ruby)\b[^\r\n]*\s-(?:\w*c\b|Command\b|e\b)/i.test(command)) {
         return '请将敏感值占位符直接传给目标程序，不要嵌入另一层 Shell 或脚本，以免凭据被重新解释为代码。'
     }
+    const fileOperations = [...command.matchAll(/\b(?:cat|head|tail|cut|awk|sed|grep|rg|ag|strings|xxd|od|cp|mv|ln|scp|rsync|tar|zip|Get-Content|Get-Item|Select-String)\b([^;\r\n|]*)/gi)]
+    if (fileOperations.some(match => /[?*\[\]]|\$[a-zA-Z_]|\$\(/.test(match[1]))) {
+        return '文件读取、复制和打包不能使用通配符或变量拼接路径。请使用明确的公开文件路径；已有配置应由目标程序直接使用。'
+    }
+    if (/\b(?:tar|zip)\b/.test(normalized)) {
+        return 'Agent 不能自行打包整个目录，目录内可能包含凭据。请使用已确认不含秘密的发布产物。'
+    }
+    if (/\b(?:vars|globals|locals|__dict__|__getattribute__|getattr)\b/.test(normalized) && /\b(?:python\d*|node|perl|ruby)\b/.test(normalized)) {
+        return '不能通过脚本反射访问环境或隐藏数据。请使用明确的环境状态查询或本地凭据表单。'
+    }
+    if (/\b(?:python\d*|node|perl|ruby)\b[^\r\n]*\s-(?:c|e)\b/.test(normalized) &&
+        /\b(?:open|readFile|readFileSync|read_text|read_bytes|pathlib|iterdir|listdir|walk|glob)\b/.test(normalized)) {
+        return '脚本不能直接读取文件内容。需要配置时请使用 configuration_status 获取字段状态或公开端口；已有配置可由应用直接使用。'
+    }
+    if (opaqueConfigurationCommand(command)) { return undefined }
     const path = /(?:^|[\s/=(:])(?:\.env(?:[.\w-]*)|\.ssh(?:\/[^\s;|&)]*)?|\.aws(?:\/[^\s;|&)]*)?|\.azure(?:\/[^\s;|&)]*)?|\.config\/gcloud(?:\/[^\s;|&)]*)?|\.kube\/config|\.docker\/config\.json|\.(?:npmrc|pypirc|netrc|my\.cnf|pgpass)|(?:id_(?:rsa|dsa|ecdsa|ed25519))|(?:credentials?|secrets?)(?:[.\w-]*))(?=$|[\s/;|&)])|\/etc\/(?:g?shadow)\b|\/proc\/(?:\d+|self|thread-self|\*)\/environ\b|\.(?:pem|p12|pfx|key|kdbx)(?=$|[\s;|&)])/i
     if (path.test(normalized)) {
         return 'Agent 不得访问凭据文件。需要密码或密钥时，请调用 request_user_input(kind="secret")，只索取本次操作需要的值。'

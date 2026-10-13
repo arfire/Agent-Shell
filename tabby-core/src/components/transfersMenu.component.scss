@@ -1,62 +1,42 @@
 :host {
-    min-width: 300px;
-    max-height: 80vh;
+    width: min(480px, calc(100vw - 24px));
+    min-width: 0;
+    max-width: calc(100vw - 24px);
+    max-height: min(80vh, 620px);
+    overflow-x: hidden;
     overflow-y: auto;
+    padding: 12px;
 
     &.vibrant {
         background: rgba(var(--bs-dark-rgb), 0.55);
         backdrop-filter: blur(10px);
     }
 }
-
+.transfer-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid rgba(128, 128, 128, .25);
+    strong { margin-right: auto; }
+    span { font-size: 12px; }
+}
 .transfer {
     display: flex;
-    align-items: center;
-    padding: 5px 0 5px 25px;
-    width: 100%;
-
-    .icon {
-        padding: 4px 7px;
-        width: 36px;
-        height: 32px;
-        background: rgba(0, 0, 0, .25);
-        margin-right: 12px;
-    }
-
-    .main {
-        display: flex;
-        flex-direction: column;
-        min-width: 0;
-        margin-right: auto;
-        margin-bottom: 3px;
-        width: 100%;
-
-        label {
-            margin: 0;
-            max-width: 100%;
-        }
-    }
-
-    .metadata {
-        font-size: 10px;
-        opacity: .5;
-        display: flex;
-        align-items: center;
-
-        .speed {
-            margin-left: auto;
-        }
-    }
-
-    > i {
-        margin-right: 10px;
-    }
-}
-
-button {
-    flex: none;
-}
-
-svg {
-    height: 14px;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px 0;
+    border-bottom: 1px solid rgba(128, 128, 128, .15);
+    .icon { flex: 0 0 24px; padding-top: 4px; text-align: center; }
+    .main { flex: 1; min-width: 0; }
+    .name-line { display: flex; gap: 8px; align-items: baseline; margin-bottom: 4px; }
+    .file-name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .transfer-state { flex-shrink: 0; font-size: 12px; }
+    .transfer-path { font-size: 12px; opacity: .7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: 6px; }
+    .metadata { display: flex; flex-wrap: wrap; gap: 3px; font-size: 12px; opacity: .8; padding-top: 4px; }
+    .progress-number { margin-left: 8px; }
+    .speed { margin-left: auto; }
+    .transfer-error { font-size: 12px; color: var(--bs-danger); margin-top: 6px; overflow-wrap: anywhere; }
+    .transfer-action { flex-shrink: 0; min-width: 48px; }
 }

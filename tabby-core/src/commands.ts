@@ -35,6 +35,13 @@ export class CoreCommandProvider extends CommandProvider {
                     : require('./icons/profiles.svg'),
                 run: async () => this.activate(),
             },
+            ...this.profilesService.getProviders().some(provider => provider.id === 'ssh') ? [{
+                id: 'core:connect-server',
+                locations: [CommandLocation.LeftToolbar, CommandLocation.StartPage],
+                label: '连接服务器',
+                icon: '<i class="fas fa-server"></i>',
+                run: () => this.profilesService.connectToServer(),
+            }] : [],
             ...this.profilesService.getRecentProfiles().map((profile, index) => ({
                 id: `core:recent-profile-${index}`,
                 label: profile.name,

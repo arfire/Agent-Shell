@@ -9,6 +9,25 @@ import { Subject } from 'rxjs'
 
 import { AIConfig, validateAIConfig } from './config-schema'
 
+
+function mergeConfig<T> (defaults: T, user: unknown): T {
+    if (Array.isArray(defaults)) {
+        return (Array.isArray(user) ? user : defaults) as T
+    }
+    if (!defaults || typeof defaults !== 'object') {
+        return (user === undefined ? defaults : user) as T
+    }
+    const result: Record<string, unknown> = { ...(defaults as Record<string, unknown>) }
+    if (!user || typeof user !== 'object' || Array.isArray(user)) {
+        return result as T
+    }
+    for (const [key, value] of Object.entries(user as Record<string, unknown>)) {
+        result[key] = key in result ? mergeConfig(result[key], value) : value
+    }
+    return result as T
+}
+
+
 @Injectable({ providedIn: 'root' })
 export class AIConfigService {
     readonly knownSecrets = new Set<string>()
@@ -178,21 +197,4 @@ export class AIConfigService {
         validateAIConfig(defaults)
         return defaults
     }
-}
-
-function mergeConfig<T> (defaults: T, user: unknown): T {
-    if (Array.isArray(defaults)) {
-        return (Array.isArray(user) ? user : defaults) as T
-    }
-    if (!defaults || typeof defaults !== 'object') {
-        return (user === undefined ? defaults : user) as T
-    }
-    const result: Record<string, unknown> = { ...(defaults as Record<string, unknown>) }
-    if (!user || typeof user !== 'object' || Array.isArray(user)) {
-        return result as T
-    }
-    for (const [key, value] of Object.entries(user as Record<string, unknown>)) {
-        result[key] = key in result ? mergeConfig(result[key], value) : value
-    }
-    return result as T
 }

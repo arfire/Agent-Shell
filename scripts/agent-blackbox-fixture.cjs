@@ -59,9 +59,9 @@ const model = http.createServer(async (req, res) => {
             const values = request.messages.filter(m => m.role === 'tool').map(m => JSON.parse(m.content))
             const credential = values.find(v => v.value)?.value
             let name = 'terminal_exec', args
-            if (!tool) { name = 'request_user_input'; args = { prompt: '恢复流程测试密码', kind: 'secret' } }
+            if (!tool) { name = 'request_user_input'; args = { prompt: '恢复流程测试密码', kind: 'secret', program: 'curl', target: 'http://127.0.0.1:18081' } }
             else if (tool.value) { args = { command: `bash -c "test -n ${credential}"`, reason: '测试不支持的密码嵌套写法' } }
-            else if (tool.executed === false) { args = { command: `test -n "${credential}" && printf 'RECOVERY_OK\\n'`, reason: '改用直接参数，仅验证密码传入' } }
+            else if (tool.executed === false) { args = { command: `curl --disable --noproxy "*" --fail -H "Authorization: Bearer ${credential}" http://127.0.0.1:18081/recover`, reason: '改用已绑定目标，仅验证密码传入' } }
             else { delta({ content: 'BB_RECOVER_DONE' }) }
             if (args) delta({ tool_calls: [{ index: 0, id: crypto.randomUUID(), type: 'function', function: { name, arguments: JSON.stringify(args) } }] })
         } else if (scenario === 'BB_PLAN') {
@@ -73,11 +73,11 @@ const model = http.createServer(async (req, res) => {
             if (args) delta({ tool_calls: [{ index: 0, id: crypto.randomUUID(), type: 'function', function: { name, arguments: JSON.stringify(args) } }] })
         } else if (['BB_CREDENTIAL', 'BB_GENERATE'].includes(scenario) && !tool) {
             const name = scenario === 'BB_GENERATE' ? 'generate_secret' : 'request_user_input'
-            const args = name === 'generate_secret' ? { description: '黑盒测试 · 随机服务密钥' } : { prompt: '测试数据库密码', kind: 'secret' }
+            const args = name === 'generate_secret' ? { description: '黑盒测试 · 随机服务密钥' } : { prompt: '测试服务密码', kind: 'secret', program: 'curl', target: 'http://127.0.0.1:18081' }
             delta({ tool_calls: [{ index: 0, id: crypto.randomUUID(), type: 'function', function: { name, arguments: JSON.stringify(args) } }] })
         } else if (['BB_CREDENTIAL', 'BB_GENERATE'].includes(scenario) && tool?.value) {
             delta({ tool_calls: [{ index: 0, id: crypto.randomUUID(), type: 'function', function: { name: 'terminal_exec',
-                arguments: JSON.stringify({ command: `test -n "${tool.value}" && printf 'CHECK_OK\\n'`, reason: '在服务器上验证本地凭证已传入，仅输出检查结果' }) } }] })
+                arguments: JSON.stringify({ command: scenario === 'BB_GENERATE' ? `test -n "${tool.value}" && printf 'CHECK_OK\\n'` : `curl --disable --noproxy "*" --fail -H "Authorization: Bearer ${tool.value}" http://127.0.0.1:18081/check`, reason: '在服务器上验证本地凭证已传入，仅输出检查结果' }) } }] })
         } else if (!tool && commands[scenario]) {
             delta({ tool_calls: [{ index: 0, id: crypto.randomUUID(), type: 'function', function: { name: 'terminal_exec', arguments: JSON.stringify({ command: commands[scenario], reason: '黑盒测试 ' + scenario }) } }] })
         } else if (tool) {
@@ -119,6 +119,18 @@ const control = http.createServer(async (req, res) => {
 async function main() {
     dockerRun(['run', '-d', '--rm', '--name', name, '-p', '127.0.0.1::22', '-e', 'ASH_TEST_PASSWORD=' + password, 'ash-native-agent-test:local'])
     created = true
+    dockerRun(['exec', '-d', name, 'python3', '-u', '-c', `
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class Check(BaseHTTPRequestHandler):
+    def do_GET(self):
+        authorized = self.headers.get('Authorization', '').startswith('Bearer ')
+        self.send_response(200 if authorized else 401)
+        self.end_headers()
+        self.wfile.write(('RECOVERY_OK\\n' if self.path == '/recover' else 'CHECK_OK\\n').encode() if authorized else b'')
+    def log_message(self, *_args):
+        pass
+HTTPServer(('127.0.0.1', 18081), Check).serve_forever()
+`])
     dockerRun(['exec', name, 'sh', '-c', "printf '%s\\n' 'LOCAL_UNLABELLED_635192' > /tmp/ash-disclosure-value.txt"])
     const sshPort = Number(JSON.parse(dockerRun(['inspect', '--format', '{{json .NetworkSettings.Ports}}', name]))['22/tcp'][0].HostPort)
     await new Promise(resolve => model.listen(0, '127.0.0.1', resolve))

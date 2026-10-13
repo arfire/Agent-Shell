@@ -1,3 +1,4 @@
+import { transferErrorMessage } from '../transfer-error'
 import * as C from 'constants'
 import { posix as path } from 'path'
 import { Component, Input, Output, EventEmitter, Inject, Optional } from '@angular/core'
@@ -244,7 +245,7 @@ export class SFTPPanelComponent {
             await this.uploadFolderRecursive(transfer, path.join(savedPath, accumPath))
         } catch (error) {
             this.cancelPendingUploads(transfer)
-            this.notifications.error(`Upload failed: ${savedPath}: ${error.message ?? error}`)
+            this.notifications.error(`上传未完成：${savedPath}。${transferErrorMessage(error)}`)
             return
         }
         if (this.path === savedPath) {
@@ -288,7 +289,7 @@ export class SFTPPanelComponent {
         try {
             await this.sftp.upload(destination, transfer)
         } catch (error) {
-            this.notifications.error(`Upload failed: ${destination}: ${error.message ?? error}`)
+            this.notifications.error(`上传未完成：${destination}。${transferErrorMessage(error)}`)
             return
         }
         if (this.path === savedPath) {
@@ -301,7 +302,7 @@ export class SFTPPanelComponent {
         if (!transfer) {
             return
         }
-        this.sftp.download(itemPath, transfer)
+        await this.sftp.download(itemPath, transfer).catch(error => this.notifications.error(`下载未完成：${itemPath}。${transferErrorMessage(error)}`))
     }
 
     async downloadFolder (folder: SFTPFile): Promise<void> {
@@ -311,6 +312,7 @@ export class SFTPPanelComponent {
                 return
             }
 
+            transfer.setEndpoints(folder.fullPath, String(transfer['basePath'] ?? transfer.getName()))
             // Start background size calculation and download simultaneously
             const sizeCalculationPromise = this.calculateFolderSizeAndUpdate(folder, transfer)
             const downloadPromise = this.downloadFolderRecursive(folder, transfer, '')
@@ -320,18 +322,22 @@ export class SFTPPanelComponent {
                 transfer.setStatus('')
                 transfer.setCompleted(true)
             } catch (error) {
+                const cancelled = transfer.isCancelled()
+                if (!cancelled) { transfer.setError(transferErrorMessage(error)) }
                 transfer.cancel()
+                if (cancelled) { return }
                 throw error
             } finally {
-                transfer.close()
+                if (!transfer.isCancelled()) { transfer.close() }
             }
         } catch (error) {
-            this.notifications.error(`Failed to download folder: ${error.message}`)
+            this.notifications.error(`文件夹下载未完成。${transferErrorMessage(error)}`)
             throw error
         }
     }
 
     private async calculateFolderSizeAndUpdate (folder: SFTPFile, transfer: DirectoryDownload) {
+        if (transfer.isCancelled()) { throw new Error('Download cancelled') }
         let totalSize = 0
         const items = await this.sftp.readdir(folder.fullPath)
         for (const item of items) {
@@ -361,7 +367,8 @@ export class SFTPPanelComponent {
                 await this.downloadFolderRecursive(item, transfer, itemRelativePath)
             } else {
                 const fileDownload = await transfer.createFile(itemRelativePath, item.mode, item.size)
-                await this.sftp.download(item.fullPath, fileDownload)
+                const untrack = transfer.trackFile(fileDownload)
+                try { await this.sftp.download(item.fullPath, fileDownload) } finally { untrack() }
             }
         }
     }

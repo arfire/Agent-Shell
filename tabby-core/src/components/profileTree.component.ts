@@ -222,6 +222,10 @@ export class ProfileTreeComponent extends BaseComponent {
         // TODO: show active tab in the side panel with eye icon
     }
 
+    connectToServer (): Promise<void> {
+        return this.profilesService.connectToServer()
+    }
+
     async launchProfile<P extends Profile> (profile: PartialProfile<P>): Promise<any> {
         return this.profilesService.launchProfile(profile)
     }

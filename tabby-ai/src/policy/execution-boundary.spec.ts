@@ -5,6 +5,7 @@ import { AIConfig } from '../config/config-schema'
 import { AgentPermissionsService, approvalAction } from './agent-permissions.service'
 import { CommandPolicyService } from './command-policy.service'
 import { SecretRedactor } from './secret-redactor'
+import { credentialAccessReason } from './credential-guard'
 
 export async function runTests (test: (name: string, run: () => Promise<void>) => Promise<void>, defaults: AIConfig): Promise<void> {
     const commands = ['docker compose down -v', 'docker-compose -f compose.yml down --volumes',
@@ -29,7 +30,7 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
                 { interrupt: async () => undefined, open: async () => undefined } as any, new AgentPermissionsService(config as any, null as any))
             for (const command of commands) {
                 const before = requests.length
-                const action = approvalAction(policy.evaluate(command).risk, mode)
+                const action = credentialAccessReason(command, mode) ? 'deny' : approvalAction(policy.evaluate(command).risk, mode)
                 const operation = service.executeTool(runtime, run, { 'function': { name: 'terminal_exec', arguments: JSON.stringify({ command, reason: 'Test' }) } })
                 if (action === 'ask' || action === 'deny') { await assert.rejects(operation, action === 'ask' ? /本轮已结束/ : /禁止|凭证保护/) } else {
                     assert.equal(JSON.parse(await operation).exitCode, 0)
@@ -39,9 +40,9 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
                     assert.equal(requests.at(-1).confirmationsRequired, 2, command)
                 }
                 const forged = service.executeApprovedCommand(runtime, run, command, 'Test', { risk: 'SAFE' }, { mode, policy: config.config.policy })
-                if (action === 'ask') { await assert.rejects(forged, /尚未获得.*审批/, 'Final execution must require approval: ' + command) } else { assert.equal(JSON.parse(await forged).exitCode, 0) }
+                if (action !== 'execute') { await assert.rejects(forged, /尚未获得.*审批|凭证保护|禁止/, 'Final execution must require approval: ' + command) } else { assert.equal(JSON.parse(await forged).exitCode, 0) }
             }
-            assert.equal(executions.length, commands.filter(command => approvalAction(policy.evaluate(command).risk, mode) === 'execute').length * 2)
+            assert.equal(executions.length, commands.filter(command => !credentialAccessReason(command, mode) && approvalAction(policy.evaluate(command).risk, mode) === 'execute').length * 2)
             assert.equal(await service.handleInteractivePrompt(runtime, run, 'Delete volumes? [y/N]', 'yes-no'), 'n')
         }
     })

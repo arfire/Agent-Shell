@@ -14,7 +14,10 @@ import { AgentContextBuilder } from './context-builder'
 import { AgentInteractionService } from './interaction.service'
 import { AgentRunQueue } from './run-queue'
 import { AgentPermissionsService, approvalAction, CommandAuthorization, permissionInstructions } from '../policy/agent-permissions.service'
-import { credentialAccessReason } from '../policy/credential-guard'
+import { credentialAccessReason, opaqueConfigurationCommand } from '../policy/credential-guard'
+import { taskCommandReason, taskRestrictions } from '../policy/task-boundary'
+import { validateSecretBinding } from '../policy/secret-binding'
+import { CONFIGURATION_TOOL, configurationCommand, configurationRoots, configurationSummary, projectPaths, validConfigurationKeys } from './configuration-inspection'
 import { commandRiskDescription } from '../policy/command-description'
 import { WebService, WebRunState } from '../web/web.service'
 
@@ -42,7 +45,9 @@ const TERMINAL_TOOLS: ChatTool[] = [{
             type: 'object',
             properties: {
                 prompt: { type: 'string', description: 'A concise question shown to the user.' },
-                kind: { type: 'string', 'enum': ['text', 'secret'], description: 'Use secret for credentials, tokens, private endpoints and other sensitive values.' },
+                kind: { type: 'string', 'enum': ['text', 'secret'], description: 'Use secret for credentials and tokens. In restricted modes program and target are required and enforced locally; unrestricted mode has no destination binding.' },
+                program: { type: 'string', description: 'For secret: curl, wget, mysql, mariadb, mysqldump, psql, pg_dump or sudo.' },
+                target: { type: 'string', description: 'For secret: HTTP(S) service origin, database host (localhost if local), or current-server for sudo. Shown to the user before accepting the secret.' },
             },
             required: ['prompt', 'kind'],
             additionalProperties: false,
@@ -69,8 +74,10 @@ interface ActiveRun {
     session: AISessionRuntime['tab']['session']
     web?: WebRunState
     containsSensitiveContext?: boolean
+    operationFailed?: boolean
     executingAuthorization?: CommandAuthorization
     interruptedExecution?: boolean
+    projectPaths?: string[]
 }
 
 class UserRejectedError extends Error { }
@@ -232,7 +239,6 @@ export class AgentService {
             }
             const mode = this.permissions.mode(runtime)
             if (run.containsSensitiveContext && mode !== 'unrestricted') {
-                // Rebuild from redacted history; do not resend raw fourth-tier results.
                 messages = this.context.build(runtime, this.redactor.redact(input), this.config.config.agent.maxContextTokens)
                 run.containsSensitiveContext = false
             }
@@ -240,8 +246,14 @@ export class AgentService {
             runtime.state.next('THINKING')
             runtime.liveText.next('')
             const textFilter = run.sensitive.streamFilter()
-            const tools = TERMINAL_TOOLS.filter(tool => mode === 'unrestricted' || tool.function.name !== 'generate_secret')
-            const result = await this.client.stream([permissionMessage, ...messages], [...tools, ...this.web?.tools(input) ?? []], {
+            const restrictions = mode === 'unrestricted' ? undefined : taskRestrictions(run.goal)
+            const tools = restrictions?.tools === false ? [] : [
+                ...TERMINAL_TOOLS.filter(tool => (mode === 'unrestricted' || tool.function.name !== 'generate_secret') &&
+                    (restrictions?.commands !== false || tool.function.name !== 'terminal_exec')),
+                ...restrictions?.commands !== false ? [CONFIGURATION_TOOL] : [],
+                ...this.web?.tools(input) ?? [],
+            ]
+            const result = await this.client.stream([permissionMessage, ...messages], tools, {
                 onRequest: (body, model) => this.recordRequest(runtime, run, body, model, 'Agent'),
                 onText: text => runtime.liveText.next(runtime.liveText.value + textFilter(text)),
             }, run.controller.signal)
@@ -286,6 +298,9 @@ export class AgentService {
 
     private async executeTool (runtime: AISessionRuntime, run: ActiveRun, toolCall: ToolCall): Promise<string> {
         if (this.isStopped(run)) { throw new DOMException('Agent stopped', 'AbortError') }
+        if (this.permissions.mode(runtime) !== 'unrestricted' && !taskRestrictions(run.goal).tools) {
+            return JSON.stringify({ error: '本次任务禁止工具调用，工具未执行。' })
+        }
         if (toolCall.function.name === 'generate_secret') {
             if (this.permissions.mode(runtime) !== 'unrestricted') {
                 return JSON.stringify({ error: '请调用 request_user_input(kind="secret") 索取本次需要的密码，复用已有占位符；不要要求用户解锁保险库。' })
@@ -300,6 +315,7 @@ export class AgentService {
                 await this.sessions.append(runtime, 'web-activity', event, run.id)
             })
         }
+        if (toolCall.function.name === 'configuration_status') { return this.inspectConfiguration(runtime, run, toolCall) }
         if (toolCall.function.name === 'request_user_input') {
             return this.requestUserInput(runtime, run, toolCall)
         }
@@ -315,6 +331,8 @@ export class AgentService {
         if (typeof argumentsValue.command !== 'string' || typeof argumentsValue.reason !== 'string') {
             return JSON.stringify({ error: 'terminal_exec requires string command and reason fields' })
         }
+        const taskError = this.permissions.mode(runtime) === 'unrestricted' ? undefined : taskCommandReason(run.goal, argumentsValue.command, run.operationFailed)
+        if (taskError) { throw new CommandBlockedError(taskError, argumentsValue.command) }
         const credentialError = credentialAccessReason(argumentsValue.command, this.permissions.mode(runtime))
         if (credentialError) {
             throw new CommandBlockedError('凭证保护：' + credentialError, argumentsValue.command)
@@ -431,6 +449,10 @@ export class AgentService {
         approvedCommand?: string,
     ): Promise<string> {
         const mode = this.permissions.mode(runtime)
+        const taskError = mode === 'unrestricted' ? undefined : taskCommandReason(run.goal, command, run.operationFailed)
+        if (taskError) { throw new CommandBlockedError(taskError, command) }
+        const secretError = mode === 'unrestricted' ? undefined : run.sensitive.useReason(command)
+        if (secretError) { throw new CommandBlockedError(secretError, command) }
         if (mode !== authorization.mode) {
             throw new CommandBlockedError('执行权限已变化，命令未执行。请按新权限重新提交所需命令进行检查。', command)
         }
@@ -462,17 +484,20 @@ export class AgentService {
             try { executableCommand = run.sensitive.restoreCommand(command, runtime.shellKind) } catch (error) {
                 throw new CommandBlockedError(getErrorMessage(error), command)
             }
+            const opaque = mode !== 'unrestricted' && opaqueConfigurationCommand(command)
+            const outputFilter = opaque ? Object.assign(() => '', { flush: () => '' }) : run.sensitive.streamFilter(true)
             const result = await this.terminal.execute(runtime, executableCommand, (prompt, kind) =>
                 this.handleInteractivePrompt(runtime, run, prompt, kind), run.controller.signal,
-            run.sensitive.streamFilter(true), () => {
+            outputFilter, () => {
                 if (this.permissions.mode(runtime) !== mode) { throw new CommandBlockedError('执行权限已变化，命令未执行。请按新权限重新提交所需命令进行检查。', command) }
             })
+            if (result.exitCode !== 0 && /\b(?:nohup|systemctl\s+(?:start|restart)|service\s+[^;\n]+\s+(?:start|restart)|docker(?:-compose|\s+compose)[^;\n]*\bup|(?:npm|yarn)\s+(?:run\s+)?start|pm2\s+(?:start|restart)|(?:sh|bash|python[\d.]*|node)\s+[^;\n]*\.(?:sh|py|js))\b/.test(command)) { run.operationFailed = true }
             await this.sessions.append(runtime, 'command-result', { exitCode: result.exitCode, handedOff: run.stopRequested }, run.id)
             runtime.state.next('OBSERVING')
             if (run.stopRequested) {
                 throw new DOMException('Agent stopped after command completion', 'AbortError')
             }
-            const output = run.sensitive.protect(result.output)
+            const output = opaque ? '已执行配置启动操作。为保护已有配置，原始输出不发送给模型；请用 compose ps 或健康检查确认服务状态。' : run.sensitive.protect(result.output)
             const unrestricted = this.permissions.mode(runtime) === 'unrestricted'
             // Raw SSH history stays local. Only this protected result copy may be
             // included in subsequent model context, including after a restart.
@@ -487,8 +512,38 @@ export class AgentService {
         }
     }
 
+    private async inspectConfiguration (runtime: AISessionRuntime, run: ActiveRun, tool: ToolCall): Promise<string> {
+        const mode = this.permissions.mode(runtime)
+        if (mode !== 'unrestricted' && !taskRestrictions(run.goal).commands) { return JSON.stringify({ error: '当前任务不允许服务器操作，配置检查未执行。' }) }
+        let args: { path?: unknown, keys?: unknown } = {}
+        try { args = JSON.parse(tool.function.arguments) } catch { return JSON.stringify({ error: '配置检查参数无效。' }) }
+        const roots = configurationRoots(args.path, run.goal, run.projectPaths)
+        if (!roots.length || !validConfigurationKeys(args.keys) || typeof args.path !== 'string') {
+            return JSON.stringify({ error: '请先让用户提供项目目录，并仅检查该目录中的明确配置路径和所需字段名。' })
+        }
+        const command = configurationCommand(args.path, args.keys, roots, runtime.shellKind ?? 'bash')
+        let raw = ''
+        const filter = Object.assign((content: string) => { raw += content; if (raw.length > 65536) { raw = '[INVALID_RESULT]' } return '' }, { flush: () => '' })
+        runtime.state.next('EXECUTING')
+        await this.sessions.append(runtime, 'ai-message', { content: '检查项目配置字段是否齐全，密码和令牌内容不会发给模型。' }, run.id)
+        if (!runtime.independentExecution) { await this.presenter.interrupt(run.id) }
+        try {
+            const result = await this.terminal.execute(runtime, command, undefined, run.controller.signal, filter, () => {
+                if (this.isStopped(run) || runtime.tab.session !== run.session || this.permissions.mode(runtime) !== mode) { throw new Error('连接、任务或权限已变化，配置检查未执行') }
+            })
+            const summary = result.exitCode === 0 ? configurationSummary(raw, args.keys) : { error: '配置检查不可用，请确认服务器 python3 可用；已有配置仍可由应用直接使用。' }
+            await this.sessions.append(runtime, 'ssh-output', { content: JSON.stringify(summary), source: 'configuration-status' }, run.id)
+            return JSON.stringify(summary)
+        } finally {
+            raw = ''
+            if (!run.stopRequested && !run.controller.signal.aborted) {
+                await this.presenter.open(runtime, run.id, () => this.stop(runtime), this.nextEventSeq(runtime))
+            }
+        }
+    }
+
     private async requestUserInput (runtime: AISessionRuntime, run: ActiveRun, toolCall: ToolCall): Promise<string> {
-        let argumentsValue: { prompt?: unknown, kind?: unknown } = {}
+        let argumentsValue: { prompt?: unknown, kind?: unknown, program?: unknown, target?: unknown } = {}
         try {
             argumentsValue = JSON.parse(toolCall.function.arguments)
         } catch (error) {
@@ -497,12 +552,17 @@ export class AgentService {
         if (typeof argumentsValue.prompt !== 'string' || !['text', 'secret'].includes(String(argumentsValue.kind))) {
             return JSON.stringify({ error: 'request_user_input requires a prompt and kind of text or secret' })
         }
+        const unrestricted = this.permissions.mode(runtime) === 'unrestricted'
+        const binding = argumentsValue.kind === 'secret' && !unrestricted ? validateSecretBinding(argumentsValue.program, argumentsValue.target) : undefined
+        if (argumentsValue.kind === 'secret' && !unrestricted && (!binding || !taskRestrictions(run.goal).commands)) {
+            return JSON.stringify({ error: '本地密码框必须明确 program 和 target，且当前任务需要执行操作。不要索取无用途的秘密。' })
+        }
         runtime.state.next('WAITING_INTERACTION')
         const form = await this.interactions.requestForm({
             sessionId: runtime.id,
             connectionId: runtime.connectionId,
             runId: run.id,
-            prompt: argumentsValue.prompt,
+            prompt: binding ? argumentsValue.prompt + '\n用途：' + binding.program + '\n授权目标：' + binding.target : argumentsValue.prompt,
             kind: argumentsValue.kind === 'secret' ? 'password' : 'text',
         })
         runtime.state.next('THINKING')
@@ -511,7 +571,7 @@ export class AgentService {
         }
         if (argumentsValue.kind === 'secret') {
             const value = form.value
-            const placeholder = run.sensitive.register(value)
+            const placeholder = binding ? run.sensitive.registerSecret(value, binding) : run.sensitive.register(value)
             await this.sessions.append(runtime, 'interaction', {
                 prompt: argumentsValue.prompt,
                 kind: 'secret',
@@ -519,9 +579,10 @@ export class AgentService {
             }, run.id)
             return JSON.stringify({ value: placeholder, sensitive: true })
         }
+        run.projectPaths = [...run.projectPaths ?? [], ...projectPaths(form.value)]
         const value = run.sensitive.protect(form.value)
         await this.sessions.append(runtime, 'interaction', {
-            prompt: argumentsValue.prompt,
+            prompt: binding ? argumentsValue.prompt + '\n用途：' + binding.program + '\n授权目标：' + binding.target : argumentsValue.prompt,
             kind: 'text',
             response: value,
         }, run.id)

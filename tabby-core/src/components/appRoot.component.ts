@@ -2,6 +2,7 @@
 import { Component, Input, HostListener, HostBinding, ViewChildren, ViewChild } from '@angular/core'
 import { trigger, style, animate, transition, state } from '@angular/animations'
 import { NgbDropdown, NgbModal } from '@ng-bootstrap/ng-bootstrap'
+import { preventOverflow, Options } from '@popperjs/core'
 import { CdkDragDrop } from '@angular/cdk/drag-drop'
 
 import { HostAppService, Platform } from '../api/hostApp'
@@ -74,6 +75,15 @@ export class AppRootComponent {
     @ViewChild('activeTransfersDropdown') activeTransfersDropdown: NgbDropdown
     unsortedTabs: BaseTabComponent[] = []
     activeTransfers: FileTransfer[] = []
+    transferPopperOptions = (options: Partial<Options>): Partial<Options> => ({
+        ...options,
+        // NgbDropdown disables this modifier by default; transfer rows need viewport containment.
+        modifiers: [...options.modifiers ?? [], {
+            ...preventOverflow,
+            options: { padding: 12, boundary: 'viewport', rootBoundary: 'viewport', tether: false },
+        }],
+    })
+
     private logger: Logger
 
     constructor (

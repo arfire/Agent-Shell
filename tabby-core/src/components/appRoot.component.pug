@@ -54,6 +54,7 @@ title-bar(
                 )
                     button.btn.btn-secondary.btn-tab-bar(
                         [ngbTooltip]='button.label',
+                        [attr.aria-label]='button.label',
                         (click)='button.run && button.run()',
                         [fastHtmlBind]='button.icon'
                     )
@@ -61,7 +62,9 @@ title-bar(
                 .d-flex(
                     ngbDropdown,
                     container='body',
-                    #activeTransfersDropdown='ngbDropdown'
+                    #activeTransfersDropdown='ngbDropdown',
+                    placement='bottom-end top-end',
+                    [popperOptions]='transferPopperOptions'
                 )
                     button.btn.btn-secondary.btn-tab-bar(
                         [hidden]='activeTransfers.length == 0',
@@ -86,6 +89,7 @@ title-bar(
                 )
                     button.btn.btn-secondary.btn-tab-bar(
                         [ngbTooltip]='button.label',
+                        [attr.aria-label]='button.label',
                         (click)='button.run && button.run()',
                         [fastHtmlBind]='button.icon'
                     )

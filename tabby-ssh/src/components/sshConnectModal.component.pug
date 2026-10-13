@@ -1,0 +1,50 @@
+.modal-header
+    h3#ssh-connect-title.m-0 连接服务器
+    button.btn.btn-link(type='button', (click)='modal.dismiss()', aria-label='关闭连接表单')
+        i.fas.fa-times
+form((ngSubmit)='connect()', novalidate)
+    .modal-body
+        p.text-muted.mb-3 填写服务器信息，无需手写连接命令。
+        .row
+            .col-8.mb-3
+                label.form-label(for='ssh-connect-host') 主机地址
+                input#ssh-connect-host.form-control(name='host', [(ngModel)]='host', placeholder='IP 或域名', autocomplete='off', autofocus, required)
+            .col-4.mb-3
+                label.form-label(for='ssh-connect-port') 端口
+                input#ssh-connect-port.form-control(name='port', type='number', [(ngModel)]='port', min='1', max='65535', required)
+        .mb-3
+            label.form-label(for='ssh-connect-user') 用户名
+            input#ssh-connect-user.form-control(name='user', [(ngModel)]='user', placeholder='例如 ubuntu 或 root', autocomplete='username', required)
+        .mb-3
+            label.form-label(for='ssh-connect-auth') 登录方式
+            select#ssh-connect-auth.form-select(name='auth', [(ngModel)]='auth')
+                option(value='password') 密码
+                option(value='publicKey') 私钥
+                option(value='agent') SSH Agent
+                option([ngValue]='null') 自动尝试
+        .mb-3(*ngIf='auth === "password"')
+            label.form-label(for='ssh-connect-password') 密码
+            input#ssh-connect-password.form-control(name='password', type='password', [(ngModel)]='password', autocomplete='current-password', placeholder='留空时连接后询问')
+        .mb-3(*ngIf='auth === "publicKey"')
+            label.form-label 私钥文件
+            button.btn.btn-outline-secondary.d-block(type='button', (click)='chooseKey()')
+                i.fas.fa-folder-open.me-2
+                | {{ privateKey ? '更换私钥' : '选择私钥文件' }}
+            small.text-muted(*ngIf='privateKey') 已选择私钥；需要口令时会在连接过程中询问。
+        .form-check.mb-2
+            input#ssh-connect-save.form-check-input(name='saveConnection', type='checkbox', [(ngModel)]='saveConnection')
+            label.form-check-label(for='ssh-connect-save') 保存此连接，下次直接打开
+        .mb-3(*ngIf='saveConnection')
+            label.form-label(for='ssh-connect-name') 连接名称（可选）
+            input#ssh-connect-name.form-control(name='name', [(ngModel)]='name', placeholder='例如测试服务器')
+        .form-check.mb-3(*ngIf='saveConnection && auth === "password"')
+            input#ssh-connect-remember.form-check-input(name='rememberPassword', type='checkbox', [(ngModel)]='rememberPassword')
+            label.form-check-label(for='ssh-connect-remember') 将密码保存到保险库或系统钥匙串
+        button.btn.btn-link.p-0(type='button', (click)='showAddress = !showAddress', [attr.aria-expanded]='showAddress') 粘贴已有 SSH 地址
+        .input-group.mt-2(*ngIf='showAddress')
+            input.form-control(name='address', [(ngModel)]='address', placeholder='user@host:22', aria-label='已有 SSH 地址')
+            button.btn.btn-outline-secondary(type='button', (click)='parseAddress()') 填入表单
+        .alert.alert-danger.mt-3.mb-0(*ngIf='error', role='alert') {{ error }}
+    .modal-footer
+        button.btn.btn-secondary(type='button', (click)='modal.dismiss()', [disabled]='busy') 取消
+        button.btn.btn-primary(type='submit', [disabled]='!valid || busy') {{ busy ? '正在保存…' : '连接服务器' }}

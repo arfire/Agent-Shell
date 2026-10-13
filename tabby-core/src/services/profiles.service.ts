@@ -2,7 +2,7 @@ import { Injectable, Inject } from '@angular/core'
 import { TranslateService } from '@ngx-translate/core'
 import { NewTabParameters } from './tabs.service'
 import { BaseTabComponent } from '../components/baseTab.component'
-import { QuickConnectProfileProvider, PartialProfile, PartialProfileGroup, Profile, ProfileGroup, ProfileProvider } from '../api/profileProvider'
+import { QuickConnectProfileProvider, PartialProfile, PartialProfileGroup, Profile, ProfileGroup, ProfileProvider, profileForStorage } from '../api/profileProvider'
 import { SelectorOption } from '../api/selector'
 import { AppService } from './app.service'
 import { configMerge, ConfigProxy, ConfigService, FullyDefined } from './config.service'
@@ -193,12 +193,12 @@ export class ProfilesService {
         let recentProfiles: PartialProfile<Profile>[] = JSON.parse(window.localStorage['recentProfiles'] ?? '[]')
         if (this.config.store.terminal.showRecentProfiles > 0) {
             recentProfiles = recentProfiles.filter(x => x.group !== profile.group || x.name !== profile.name)
-            recentProfiles.unshift(profile)
+            recentProfiles.unshift(profileForStorage(profile))
             recentProfiles = recentProfiles.slice(0, this.config.store.terminal.showRecentProfiles)
         } else {
             recentProfiles = []
         }
-        window.localStorage['recentProfiles'] = JSON.stringify(recentProfiles)
+        window.localStorage['recentProfiles'] = JSON.stringify(recentProfiles.map(profileForStorage))
     }
 
     static getProfileHotkeyName (profile: PartialProfile<Profile>): string {
@@ -345,9 +345,17 @@ export class ProfilesService {
     }
 
     getRecentProfiles (): PartialProfile<Profile>[] {
-        let recentProfiles: PartialProfile<Profile>[] = JSON.parse(window.localStorage['recentProfiles'] ?? '[]')
-        recentProfiles = recentProfiles.slice(0, this.config.store.terminal.showRecentProfiles)
-        return recentProfiles
+        const recentProfiles: PartialProfile<Profile>[] = JSON.parse(window.localStorage['recentProfiles'] ?? '[]')
+        const safe = recentProfiles.map(profileForStorage)
+        if (JSON.stringify(safe) !== JSON.stringify(recentProfiles)) { window.localStorage['recentProfiles'] = JSON.stringify(safe) }
+        return safe.slice(0, this.config.store.terminal.showRecentProfiles)
+    }
+
+    async connectToServer (): Promise<void> {
+        const provider = this.getProviders().find(p => p.id === 'ssh')
+        if (!(provider instanceof QuickConnectProfileProvider)) { return }
+        const profile = await provider.promptForConnection()
+        if (profile) { await this.launchProfile(profile) }
     }
 
     async quickConnect (query: string): Promise<PartialProfile<Profile>|null> {

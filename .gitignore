@@ -59,3 +59,6 @@ crowdin.yml
 !/docs/USER_GUIDE.zh-CN.md
 !/docs/AGENT_CREDENTIAL_SAFETY.zh-CN.md
 !/docs/agent-web-search.md
+
+# Local E2E reports, screenshots and raw test evidence.
+/docs/audits/

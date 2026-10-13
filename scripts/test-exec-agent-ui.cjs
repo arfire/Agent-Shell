@@ -13,7 +13,12 @@ exports.run = async ({ evaluate, wait, screen, call }) => {
     assert.equal(failed.exitCode, 1)
     assert.match(failed.output, /UTF8 中文/)
     assert.match(failed.output, /STDERR/)
-    assert.equal(await evaluate('nativeTest.testWrites.length'), 0, 'Exec wrote to the interactive shell')
+    const startupWrites = await evaluate('nativeTest.testWrites')
+    if (startupWrites.length) { console.log('Interactive bytes observed during initial exec:', JSON.stringify(startupWrites)) }
+    // Fish can request cursor position and terminal capabilities during startup.
+    // Those protocol replies are not Agent commands; all other bytes remain forbidden.
+    const protocolReply = /^\x1b\[(?:\d+;\d+R|\?[\d;]+c)$/
+    assert.deepEqual(startupWrites.filter(text => !protocolReply.test(text)), [], 'Exec wrote command bytes to the interactive shell')
 
     await send('vim -Nu NONE ' + filename + '\r')
     await wait('nativeTest.alternateScreenActive', 'Vim alternate screen')

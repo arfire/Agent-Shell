@@ -96,10 +96,12 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
         assert.equal(fixture.events.some(event => event.type === 'ai-command'), false)
         assert.equal(fixture.events.find(event => event.type === 'error').data.command, 'cat .env')
     })
-    await test('a password form resumes the same task, rejected wrapper is corrected, and the password never needs the vault', async () => {
+    await test('a bound password form resumes the task and a rejected wrapper is corrected without using the vault', async () => {
         const f = create('full', 'INSTALL_OK')
         const password = 'test-quote\'"-$()-value'
         let calls = 0
+        let token = ''
+        const acceptedCommand = (): string => `curl --disable --noproxy "*" -H "Authorization: Bearer ${token}" https://service.example/install`
         const sent: string[] = []
         f.config.saveAgentCredential = () => assert.fail('No business password may be saved')
         f.config.loadAgentCredential = () => assert.fail('No business password may require vault unlock')
@@ -110,15 +112,16 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
         f.service.client = { stream: async (messages) => {
             calls++
             assert.ok(!JSON.stringify(messages).includes(password))
-            if (calls === 1) { return { content: '', toolCalls: [tool('request_user_input', { prompt: '设置安装密码', kind: 'secret' })] } }
+            if (calls === 1) { return { content: '', toolCalls: [tool('request_user_input', { prompt: '提供服务凭据', kind: 'secret', program: 'curl', target: 'https://service.example' })] } }
             if (calls === 2) {
-                assert.equal(JSON.parse(messages.at(-1).content).value, '__TABBY_SENSITIVE_1__')
-                return { content: '', toolCalls: [tool('terminal_exec', { command: 'bash -c "installer --password __TABBY_SENSITIVE_1__"', reason: 'Install' })] }
+                token = JSON.parse(messages.at(-1).content).value
+                assert.match(token, /^__TABBY_SENSITIVE_\d+__$/)
+                return { content: '', toolCalls: [tool('terminal_exec', { command: `bash -c "installer --password ${token}"`, reason: 'Install' })] }
             }
             if (calls === 3) {
                 assert.equal(JSON.parse(messages.at(-1).content).executed, false)
-                assert.equal(JSON.parse(messages.at(-1).content).command, 'bash -c "installer --password __TABBY_SENSITIVE_1__"')
-                return { content: '', toolCalls: [tool('terminal_exec', { command: 'bash /tmp/installer.sh --password __TABBY_SENSITIVE_1__', reason: 'Install' })] }
+                assert.equal(JSON.parse(messages.at(-1).content).command, `bash -c "installer --password ${token}"`)
+                return { content: '', toolCalls: [tool('terminal_exec', { command: acceptedCommand(), reason: 'Install' })] }
             }
             assert.equal(JSON.parse(messages.at(-1).content).exitCode, 0)
             return { content: '安装完成', toolCalls: [] }
@@ -126,10 +129,24 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
         await f.service.runLoop(f.runtime, f.run, 'Install')
         assert.equal(calls, 4)
         assert.equal(sent.length, 1)
-        assert.equal(sent[0], f.run.sensitive.restoreCommand('bash /tmp/installer.sh --password __TABBY_SENSITIVE_1__'))
+        assert.equal(sent[0], f.run.sensitive.restoreCommand(acceptedCommand()))
         assert.ok(!JSON.stringify(f.events).includes(password))
         f.run.sensitive.clear()
-        assert.throws(() => f.run.sensitive.restoreCommand('__TABBY_SENSITIVE_1__'), /失效/)
+        assert.throws(() => f.run.sensitive.restoreCommand(token), /失效/)
+    })
+    await test('unrestricted execution bypasses task checks, credential reads, destination binding and output filtering', async () => {
+        const f = create('unrestricted', 'PASSWORD=synthetic-unrestricted-value\n')
+        f.run.goal = '只分析，不执行任何命令，不使用任何工具'
+        const tool = (name: string, args: unknown): any => ({ 'function': { name, arguments: JSON.stringify(args) } })
+        const result = JSON.parse(await f.service.executeTool(f.runtime, f.run, tool('terminal_exec', { command: 'cat /tmp/.env', reason: 'Test' })))
+        assert.equal(result.output, 'PASSWORD=synthetic-unrestricted-value\n')
+        f.service.interactions = { requestForm: async () => ({ submitted: true, value: 'synthetic-form-value' }) }
+        const form = JSON.parse(await f.service.executeTool(f.runtime, f.run, tool('request_user_input', { kind: 'secret', prompt: 'Test' })))
+        assert.match(form.value, /^__TABBY_SENSITIVE_\d+__$/)
+        const token = f.run.sensitive.registerSecret('synthetic-bound-value', { program: 'curl', target: 'https://approved.example' })
+        const forwarded = JSON.parse(await f.service.executeTool(f.runtime, f.run, tool('terminal_exec', { command: `echo ${token} > /tmp/test`, reason: 'Test' })))
+        assert.equal(forwarded.exitCode, 0)
+        assert.equal(f.interactions.forms.value.length, 0)
     })
     await test('unrestricted password generation is autonomous and never writes to the vault', async () => {
         const f = create('unrestricted')
