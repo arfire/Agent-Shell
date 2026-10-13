@@ -1,4 +1,6 @@
 import { Injectable, InjectFlags, Injector } from '@angular/core'
+import { NgbModal } from '@ng-bootstrap/ng-bootstrap'
+import { SSHConnectModalComponent } from './components/sshConnectModal.component'
 import { NewTabParameters, PartialProfile, TranslateService, QuickConnectProfileProvider } from 'tabby-core'
 import { SSHProfileSettingsComponent } from './components/sshProfileSettings.component'
 import { SSHTabComponent } from './components/sshTab.component'
@@ -58,6 +60,11 @@ export class SSHProfilesService extends QuickConnectProfileProvider<SSHProfile> 
             this.configDefaults.options.algorithms[k] = [...defaultAlgorithms[k]]
             if (k !== SSHAlgorithmType.COMPRESSION) { this.configDefaults.options.algorithms[k].sort() }
         }
+    }
+
+    async promptForConnection (): Promise<PartialProfile<SSHProfile>|null> {
+        const modal = this.injector.get(NgbModal).open(SSHConnectModalComponent, { ariaLabelledBy: 'ssh-connect-title', scrollable: true })
+        return modal.result.catch(() => null)
     }
 
     async getBuiltinProfiles (): Promise<PartialProfile<SSHProfile>[]> {

@@ -36,6 +36,14 @@ export type PartialProfile<T extends Profile> = Omit<Omit<Omit<{
     }
 }
 
+/** Keep SSH passwords in the live connection, never recent-profile or recovery storage. */
+export function profileForStorage (profile: PartialProfile<Profile>): PartialProfile<Profile> {
+    if (profile.type !== 'ssh') { return profile }
+    const options = { ...profile.options }
+    delete options.password
+    return { ...profile, options }
+}
+
 export interface ProfileGroup {
     id: string
     parentGroupId?: string
@@ -81,6 +89,10 @@ export abstract class ProfileProvider<P extends Profile> {
 export abstract class ConnectableProfileProvider<P extends ConnectableProfile> extends ProfileProvider<P> {}
 
 export abstract class QuickConnectProfileProvider<P extends ConnectableProfile> extends ConnectableProfileProvider<P> {
+
+    promptForConnection (): Promise<PartialProfile<P>|null> {
+        return Promise.resolve(null)
+    }
 
     abstract quickConnect (query: string): PartialProfile<P>|null
 

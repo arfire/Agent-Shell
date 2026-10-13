@@ -94,16 +94,16 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
             assert.throws(() => scope.restoreCommand('mysql -p__TABBY_SENSITIVE_999__'), /占位符已失效/)
         }
     })
-    await test('unrestricted allows protected commands and raw results while lower tiers remain redacted', async () => {
-        for (const command of blocked) { assert.equal(credentialAccessReason(command, 'unrestricted'), undefined) }
+    await test('all permission tiers and old opt-out scopes retain credential privacy', async () => {
+        for (const command of blocked) { assert.ok(credentialAccessReason(command, 'unrestricted')) }
         let unrestricted = true
         const redactor = new SecretRedactor({ config: defaults } as any)
         const scope = redactor.createScope(() => unrestricted)
         const output = 'DB_PASSWORD=synthetic-permission-test\n'
         const filter = scope.streamFilter(true)
-        assert.equal(filter(output) + filter.flush(), output)
-        assert.equal(scope.protect(output), output)
-        assert.equal(scope.redactKnown(output), output)
+        assert.equal((filter(output) + filter.flush()).includes('synthetic-permission-test'), false)
+        assert.equal(scope.protect(output).includes('synthetic-permission-test'), false)
+        assert.equal(scope.redactKnown(output).includes('synthetic-permission-test'), false)
         assert.equal(redactor.redact(output).includes('synthetic-permission-test'), false)
         unrestricted = false
         assert.equal(scope.protect(output).includes('synthetic-permission-test'), false)

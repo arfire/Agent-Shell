@@ -5,6 +5,7 @@ import { AIConfig } from '../config/config-schema'
 import { AgentPermissionsService, approvalAction } from './agent-permissions.service'
 import { CommandPolicyService } from './command-policy.service'
 import { SecretRedactor } from './secret-redactor'
+import { credentialAccessReason } from './credential-guard'
 
 export async function runTests (test: (name: string, run: () => Promise<void>) => Promise<void>, defaults: AIConfig): Promise<void> {
     const commands = ['docker compose down -v', 'docker-compose -f compose.yml down --volumes',
@@ -30,19 +31,19 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
             for (const command of commands) {
                 const before = requests.length
                 const rejected = JSON.parse(await service.executeTool(runtime, run, { 'function': { name: 'terminal_exec', arguments: JSON.stringify({ command, reason: 'Test' }) } }))
-                const action = approvalAction(policy.evaluate(command).risk, mode)
+                const action = credentialAccessReason(command, mode) ? 'deny' : approvalAction(policy.evaluate(command).risk, mode)
                 assert.equal(requests.length, before + (action === 'ask' ? 1 : 0), mode + command)
                 if (action === 'ask') {
                     assert.equal(rejected.status, 'rejected')
                     assert.equal(rejected.executed, false)
-                } else { assert.equal(rejected.exitCode, 0) }
+                } else if (action === 'deny') { assert.ok(rejected.error) } else { assert.equal(rejected.exitCode, 0) }
                 if (action === 'ask' && /down|prune|rm -rf|DROP|FLUSHALL|reset|Remove-Item/.test(command)) {
                     assert.equal(requests.at(-1).confirmationsRequired, 2, command)
                 }
                 const forged = JSON.parse(await service.executeApprovedCommand(runtime, run, command, 'Test', { risk: 'SAFE' }, { mode, policy: config.config.policy }))
-                if (action === 'ask') { assert.ok(forged.error, 'Final execution must require approval: ' + command) } else { assert.equal(forged.exitCode, 0) }
+                if (action !== 'execute') { assert.ok(forged.error, 'Final execution must require approval: ' + command) } else { assert.equal(forged.exitCode, 0) }
             }
-            assert.equal(executions.length, commands.filter(command => approvalAction(policy.evaluate(command).risk, mode) === 'execute').length * 2)
+            assert.equal(executions.length, commands.filter(command => !credentialAccessReason(command, mode) && approvalAction(policy.evaluate(command).risk, mode) === 'execute').length * 2)
             assert.equal(await service.handleInteractivePrompt(runtime, run, 'Delete volumes? [y/N]', 'yes-no'), 'n')
         }
     })

@@ -47,7 +47,7 @@ const model = http.createServer(async (req, res) => {
     } else if (lastUser.includes('审批测试') && !toolDone) {
         delta({ tool_calls: [{ index: 0, id: 'local-test', type: 'function', function: { name: 'terminal_exec', arguments: JSON.stringify({ command: "printf 'APPROVAL_OK\\n'", reason: '本地审批验证：输出测试标记' }) } }] })
     } else if (lastUser.includes('敏感输入测试') && !toolDone) {
-        delta({ tool_calls: [{ index: 0, id: 'secret-test', type: 'function', function: { name: 'request_user_input', arguments: JSON.stringify({ prompt: '请输入测试 Token（仅用于本地验证）', kind: 'secret' }) } }] })
+        delta({ tool_calls: [{ index: 0, id: 'secret-test', type: 'function', function: { name: 'request_user_input', arguments: JSON.stringify({ prompt: '请输入测试 Token（仅用于本地验证）', kind: 'secret', program: 'curl', target: 'https://approved.example' }) } }] })
     } else if (toolDone && JSON.parse(messages.at(-1).content).status === 'rejected') {
         delta({ content: '命令未执行，我会根据已有信息继续分析。REJECTION_CONTINUED\n' })
     } else {
@@ -171,15 +171,6 @@ async function main () {
         const result = await call('Page.captureScreenshot', { format: 'png' })
         fs.writeFileSync(path.join(directory, name + '.png'), Buffer.from(result.data, 'base64'))
     }
-    if (await evaluate('ng.getComponent(document.querySelector("ash-agent-dock")).runtime.independentExecution')) {
-        await require('./test-exec-agent-ui.cjs').run({ evaluate, wait, screen, call })
-        assert.deepEqual(rendererErrors, [], 'Independent Agent UI emitted renderer errors')
-        console.log('Screenshots and isolated data:', directory)
-        fs.writeFileSync(path.join(root, '.build-cache/native-agent-ui-latest.txt'), directory)
-        await evaluate('nativeTest.session.destroy(); true')
-        void evaluate('require("@electron/remote").app.exit(0)')
-        return
-    }
     if (process.env.ASH_TEST_INPUT_ONLY === '1') {
         await require('./test-input-ui.cjs').run({ evaluate, wait, screen, call })
         assert.deepEqual(rendererErrors, [], 'Input UI emitted renderer errors')
@@ -189,6 +180,15 @@ async function main () {
     }
     if (process.env.ASH_TEST_SFTP_ONLY === '1') {
         await require('./test-sftp-ui.cjs').run({ directory, evaluate, wait, screen })
+        await evaluate('nativeTest.session.destroy(); true')
+        void evaluate('require("@electron/remote").app.exit(0)')
+        return
+    }
+    if (await evaluate('ng.getComponent(document.querySelector("ash-agent-dock")).runtime.independentExecution')) {
+        await require('./test-exec-agent-ui.cjs').run({ evaluate, wait, screen, call })
+        assert.deepEqual(rendererErrors, [], 'Independent Agent UI emitted renderer errors')
+        console.log('Screenshots and isolated data:', directory)
+        fs.writeFileSync(path.join(root, '.build-cache/native-agent-ui-latest.txt'), directory)
         await evaluate('nativeTest.session.destroy(); true')
         void evaluate('require("@electron/remote").app.exit(0)')
         return

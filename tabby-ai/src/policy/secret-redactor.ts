@@ -1,3 +1,5 @@
+import { randomInt } from 'crypto'
+import { boundSecretReason, SecretBinding } from './secret-binding'
 import { Injectable } from '@angular/core'
 
 import { AIConfigService } from '../config/ai-config.service'
@@ -32,12 +34,13 @@ function redactCredentials (content: string): string {
 
 export class SecretRedactionScope {
     private values = new Map<string, string>()
+    private bindings = new Map<string, SecretBinding>()
+    private nextId = randomInt(100000000, 900000000)
 
-    constructor (private redactor: SecretRedactor, private allowSensitiveContent: () => boolean = () => false) { }
+    constructor (private redactor: SecretRedactor, _allowSensitiveContent: () => boolean = () => false) { }
 
     protect (content: string): string {
         let result = this.replaceKnown(content)
-        if (this.allowSensitiveContent()) { return result }
         for (const pattern of DISCOVERABLE_SENSITIVE_VALUES) {
             result = result.replace(pattern, value => this.register(value))
         }
@@ -46,7 +49,7 @@ export class SecretRedactionScope {
 
     redactKnown (content: string): string {
         const result = this.replaceKnown(content)
-        return this.allowSensitiveContent() ? result : this.redactor.redact(result)
+        return this.redactor.redact(result)
     }
 
     /** Keep a possible secret prefix until the next transport chunk arrives. */
@@ -55,7 +58,6 @@ export class SecretRedactionScope {
         let privateKey = false
         let secretQuote = ''
         const redact = (text: string): string => {
-            if (this.allowSensitiveContent()) { return this.replaceKnown(text) }
             if (!bufferLines) { return this.redactKnown(text) }
             let visible = ''
             for (const line of text.match(/[^\n]*\n|[^\n]+$/g) ?? []) {
@@ -151,6 +153,27 @@ export class SecretRedactionScope {
         return result
     }
 
+    registerSecret (value: string, binding: SecretBinding): string {
+        if (!value) { return '' }
+        const placeholder = `__TABBY_SENSITIVE_${this.nextId++}__`
+        this.values.set(placeholder, value)
+        this.bindings.set(placeholder, { ...binding })
+        return placeholder
+    }
+
+    useReason (command: string): string|undefined {
+        const tokens = [...command.matchAll(/__TABBY_SENSITIVE_\d+__/g)].map(match => match[0])
+        for (const token of tokens) {
+            const binding = this.bindings.get(token)
+            if (!binding) { return '凭据占位符未绑定用途或已失效，请通过本地密码框指定目标程序和服务后重新提供。' }
+            const reason = boundSecretReason(command, binding)
+            if (reason) { return reason }
+        }
+        return undefined
+    }
+
+    clear (): void { this.values.clear(); this.bindings.clear() }
+
     register (value: string): string {
         if (!value) { return '' }
         for (const [placeholder, registered] of this.values) {
@@ -158,7 +181,7 @@ export class SecretRedactionScope {
                 return placeholder
             }
         }
-        const placeholder = `__TABBY_SENSITIVE_${this.values.size + 1}__`
+        const placeholder = `__TABBY_SENSITIVE_${this.nextId++}__`
         this.values.set(placeholder, value)
         return placeholder
     }

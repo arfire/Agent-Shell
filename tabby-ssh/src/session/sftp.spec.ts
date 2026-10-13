@@ -8,7 +8,7 @@ export async function runTests (
     sftp: SFTPSession,
     native: SFTP,
 ): Promise<void> {
-    const { FileUpload } = load('tabby-core/src/api/platform.ts') as typeof import('tabby-core')
+    const { FileUpload, FileDownload } = load('tabby-core/src/api/platform.ts') as typeof import('tabby-core')
     class Upload extends FileUpload {
         offset = 0
         closed = false
@@ -51,12 +51,46 @@ export async function runTests (
         })
     }
 
+    class Download extends FileDownload {
+        chunks: Uint8Array[] = []
+        closed = false
+        constructor (private size: number) { super() }
+        getName (): string { return 'download.bin' }
+        getSize (): number { return this.size }
+        close (): void { this.closed = true }
+        async write (data: Uint8Array): Promise<void> { this.chunks.push(data); this.increaseProgress(data.length) }
+    }
+    for (const size of [0, 15, 700000]) {
+        await test(`SFTP downloads ${size} bytes exactly`, async () => {
+            const transfer = new Download(size)
+            await sftp.download(`/tmp/ash-upload-${size}.bin`, transfer)
+            assert.deepEqual(Buffer.concat(transfer.chunks), Buffer.from(Uint8Array.from({ length: size }, (_, i) => i % 251)))
+            assert.equal(transfer.closed, true)
+            assert.equal(transfer.isComplete(), true)
+            assert.equal(transfer.getError(), '')
+        })
+    }
+    await test('SFTP missing download records a readable failure', async () => {
+        const transfer = new Download(1)
+        await assert.rejects(sftp.download('/tmp/ash-absent.bin', transfer))
+        assert.equal(transfer.isComplete(), false)
+        assert.ok(transfer.getError())
+    })
+    await test('SFTP cancelled download writes no further bytes', async () => {
+        const transfer = new Download(700000)
+        transfer.cancel()
+        await assert.rejects(sftp.download('/tmp/ash-upload-700000.bin', transfer), /cancelled/)
+        assert.equal(transfer.chunks.length, 0)
+        assert.equal(transfer.isComplete(), false)
+        assert.equal(transfer.getError(), '')
+    })
+
     await test('SFTP permission failure never reports completion', async () => {
         const transfer = new Upload(new Uint8Array([1, 2, 3]))
         await assert.rejects(sftp.upload('/root/ash-denied.bin', transfer))
         assert.equal(transfer.isComplete(), false)
         assert.equal(transfer.isCancelled(), true)
-        assert.match(transfer.getStatus(), /Upload failed: \/root\/ash-denied.bin/)
+        assert.match(transfer.getError(), /权限不足/)
     })
 
     await test('SFTP final rename failure stays failed after all source bytes are read', async () => {
@@ -68,7 +102,7 @@ export async function runTests (
             assert.equal(transfer.getCompletedBytes(), 3)
             assert.equal(transfer.isComplete(), false)
             assert.equal(transfer.isCancelled(), true)
-            assert.match(transfer.getStatus(), /Injected rename failure/)
+            assert.ok(transfer.getError())
             assert.equal((await sftp.readdir('/tmp')).some(file => file.name.startsWith('ash-rename-failed.bin')), false)
         } finally {
             native.rename = rename

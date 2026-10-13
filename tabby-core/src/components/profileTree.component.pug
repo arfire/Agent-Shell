@@ -1,4 +1,7 @@
 .p-2.h-100.d-flex.flex-column
+    button.btn.btn-primary.mb-2(*ngIf='embedded && profileType === "ssh"', type='button', (click)='connectToServer()')
+        i.fas.fa-server.me-2
+        | 连接服务器
     button.btn.btn-sm.btn-link.align-self-start(*ngIf='embedded', (click)='newGroup()')
         i.fas.fa-folder-plus.me-1
         | 新建分组

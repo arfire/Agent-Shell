@@ -1,3 +1,4 @@
+import { transferErrorMessage } from '../transfer-error'
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import { Subject, Observable } from 'rxjs'
 import { posix as posixPath } from 'path'
@@ -112,6 +113,8 @@ export class SFTPSession {
     }
 
     async upload (path: string, transfer: FileUpload): Promise<void> {
+        transfer.setEndpoints(transfer.getName(), path)
+        transfer.setError('')
         this.logger.info(`Uploading into ${path}`)
         const tempPath = path + '.tabby-upload-' + randomUUID()
         let handle: SFTPFileHandle|undefined = undefined
@@ -148,7 +151,8 @@ export class SFTPSession {
             transfer.setCompleted(true)
             transfer.setStatus(`Uploaded to ${path}`)
         } catch (e) {
-            transfer.setStatus(`Upload failed: ${path}: ${e.message ?? e}`)
+            if (!transfer.isCancelled()) { transfer.setError(transferErrorMessage(e)) }
+            transfer.setStatus(transferErrorMessage(e))
             this.logger.error(`Upload failed: ${path}: ${e.message ?? e}`)
             if (!transfer.isCancelled()) {
                 transfer.cancel()
@@ -189,21 +193,34 @@ export class SFTPSession {
     }
 
     async download (path: string, transfer: FileDownload): Promise<void> {
+        transfer.setEndpoints(path, String(transfer['filePath'] ?? transfer.getName()))
+        transfer.setError('')
         this.logger.info('Downloading', path)
+        let handle: SFTPFileHandle|undefined = undefined
+        let written = 0
         try {
-            const handle = await this.open(path, russh.OPEN_READ)
+            transfer.setCompleted(false)
+            handle = await this.open(path, russh.OPEN_READ)
             while (true) {
+                if (transfer.isCancelled()) { throw new Error('Download cancelled') }
                 const chunk = await handle.read()
-                if (!chunk.length) {
-                    break
-                }
+                if (!chunk.length) { break }
                 await transfer.write(chunk)
+                written += chunk.length
             }
+            await handle.close()
+            handle = undefined
+            if (transfer.isCancelled()) { throw new Error('Download cancelled') }
+            if (written !== transfer.getSize()) { throw new Error('Downloaded file size does not match the source') }
             transfer.close()
-            handle.close()
+            transfer.setCompleted(true)
         } catch (e) {
+            transfer.setCompleted(false)
+            if (!transfer.isCancelled()) { transfer.setError(transferErrorMessage(e)) }
             transfer.cancel()
             throw e
+        } finally {
+            await handle?.close().catch(() => null)
         }
     }
 

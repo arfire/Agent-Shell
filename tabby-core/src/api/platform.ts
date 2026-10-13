@@ -21,9 +21,21 @@ export interface MessageBoxResult {
 }
 
 export abstract class FileTransfer {
+    get progress$ (): Observable<number> { return this.progress.asObservable() }
+
     abstract getName (): string
     abstract getSize (): number
     abstract close (): void
+
+    setEndpoints (source: string, destination: string): void {
+        this.source = source
+        this.destination = destination
+    }
+
+    getSource (): string { return this.source }
+    getDestination (): string { return this.destination }
+    setError (error: string): void { this.error = error }
+    getError (): string { return this.error }
 
     getSpeed (): number {
         return this.lastChunkSpeed
@@ -50,6 +62,7 @@ export abstract class FileTransfer {
     }
 
     cancel (): void {
+        if (this.cancelled) { return }
         this.cancelled = true
         this.close()
     }
@@ -71,10 +84,12 @@ export abstract class FileTransfer {
             return
         }
         this.completedBytes += bytes
-        this.lastChunkSpeed = bytes * 1000 / (Date.now() - this.lastChunkStartTime)
+        this.lastChunkSpeed = bytes * 1000 / Math.max(1, Date.now() - this.lastChunkStartTime)
         this.lastChunkStartTime = Date.now()
+        this.progress.next(bytes)
     }
 
+    private progress = new Subject<number>()
     private completedBytes = 0
     private totalSize = 0
     private lastChunkStartTime = Date.now()
@@ -82,6 +97,9 @@ export abstract class FileTransfer {
     private cancelled = false
     protected completed = false
     private status = ''
+    private source = ''
+    private destination = ''
+    private error = ''
 }
 
 export abstract class FileDownload extends FileTransfer {
@@ -89,6 +107,23 @@ export abstract class FileDownload extends FileTransfer {
 }
 
 export abstract class DirectoryDownload extends FileTransfer {
+    private files = new Set<FileDownload>()
+
+    isComplete (): boolean { return this.completed && !this.isCancelled() }
+
+    trackFile (file: FileDownload): () => void {
+        if (this.isCancelled()) { file.cancel(); return () => undefined }
+        this.files.add(file)
+        const subscription = file.progress$.subscribe(bytes => this.increaseProgress(bytes))
+        return () => { subscription.unsubscribe(); this.files.delete(file) }
+    }
+
+    cancel (): void {
+        if (this.isCancelled()) { return }
+        super.cancel()
+        for (const file of this.files) { file.cancel() }
+    }
+
     abstract createDirectory (relativePath: string): Promise<void>
     abstract createFile (relativePath: string, mode: number, size: number): Promise<FileDownload>
 }

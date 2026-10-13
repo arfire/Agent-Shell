@@ -138,6 +138,9 @@ async function main () {
     await load('tabby-ai/src/session/ai-session.service.spec.ts').runTests(test)
     await load('tabby-ai/src/policy/credential-guard.spec.ts').runTests(test, defaults)
     await load('tabby-ai/src/policy/execution-boundary.spec.ts').runTests(test, defaults)
+    await load('tabby-ai/src/policy/optimization.spec.ts').runTests(test, defaults)
+    await load('tabby-core/src/api/profileProvider.spec.ts').runTests(test)
+    await load('tabby-core/src/api/platform.spec.ts').runTests(test)
     await load('tabby-ai/src/terminal/ai-input.middleware.spec.ts').runTests(test, fixture)
     await test('terminal color and capability replies do not end Fish bootstrap while its startup screen probe is active', async () => {
         const f = await fixture()

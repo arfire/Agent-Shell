@@ -8,7 +8,7 @@ export const APPROVAL_MODES: { value: ApprovalMode, label: string, description: 
     { value: 'configured', label: '按配置执行', description: '只读查询可自动执行；修改逐条审批，危险操作二次确认，禁止规则始终生效。' },
     { value: 'auto', label: '帮我批准', description: '自动批准单次确认的命令；双次确认仍由你确认，禁止规则和敏感读取限制继续生效。' },
     { value: 'full', label: '完全放行', description: '自动批准单次、双次确认的命令；禁止规则和敏感读取限制继续生效。' },
-    { value: 'unrestricted', label: '放手一搏', description: '跳过命令审批、禁止规则和敏感读取限制。配置和凭据可能发送给模型服务商；仍受服务器账号权限限制。' },
+    { value: 'unrestricted', label: '放手一搏', description: '跳过普通命令审批和自定义禁止规则；任务边界、凭据保护及服务器账号权限始终生效。' },
 ]
 
 export interface CommandAuthorization {
@@ -25,9 +25,9 @@ export function approvalAction (risk: CommandRisk, mode: ApprovalMode): 'execute
 
 export function permissionInstructions (mode: ApprovalMode): string {
     const description = APPROVAL_MODES.find(option => option.value === mode)?.description ?? ''
-    return `Current execution permission: ${mode}. ${description}\n` + (mode === 'unrestricted'
-        ? 'The user has enabled unrestricted execution. You may execute commands, read configuration and credentials needed for the authorized task without per-command approval. Tool outputs may include sensitive values. Do not claim that credential reads are forbidden in this mode. Operating-system permissions and the user\'s task scope still apply.'
-        : 'Sensitive configuration and credential access is forbidden in this mode, even if ordinary commands are auto-approved. Abandon attempts to obtain protected data: do not read, search, copy, encode, infer or extract it using scripts, alternate tools, environment dumps, container inspection or network commands. A refusal is final for that protected operation; do not suggest a manual bypass or repeatedly request elevation. Continue permitted work. Ask for only a required credential through request_user_input(kind="secret"). Never send private configuration, logs, private addresses or credentials to search tools or external services.')
+    return `Current execution permission: ${mode}. ${description}\n` +
+        'Sensitive credential access is forbidden in every mode. Automatic approval never permits reading or exporting credentials. Respect the latest user task boundaries. Use request_user_input(kind="secret", program=..., target=...) only for a necessary credential; its destination is enforced locally. Credential-bearing curl must start with --disable, use --noproxy "*", and never follow redirects. MySQL calls must start with --no-defaults and explicitly specify --host. Sudo passwords are only for printf-to-sudo -S -k -v validation; execute subsequent operations with sudo -n. Existing .env files may be consumed by application startup or simple docker compose --env-file PATH up -d; never print them.'
+
 }
 
 @Injectable({ providedIn: 'root' })
@@ -55,7 +55,7 @@ export class AgentPermissionsService {
         const result = await this.platform.showMessageBox({
             type: 'warning',
             message: '开启“放手一搏”？',
-            detail: 'Agent 将跳过命令审批、禁止规则和敏感读取限制，可直接读取配置和凭据。这些内容可能发送给模型服务商，也可能被命令传到网络。服务器账号本身的权限仍然生效。',
+            detail: 'Agent 将跳过普通命令审批及自定义禁止规则，可能直接删除数据或更改服务器。任务范围和凭据保护仍然生效；不能读取或外发秘密。服务器账号本身的权限仍然生效。',
             buttons: ['取消', '开启放手一搏'],
             defaultId: 0,
             cancelId: 0,

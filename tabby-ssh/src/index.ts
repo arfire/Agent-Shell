@@ -9,6 +9,7 @@ import { WorkspaceFilesComponent, WorkspaceFilesProvider } from './components/wo
 import { SettingsTabProvider } from 'tabby-settings'
 import TabbyTerminalModule from 'tabby-terminal'
 
+import { SSHConnectModalComponent } from './components/sshConnectModal.component'
 import { SSHProfileSettingsComponent } from './components/sshProfileSettings.component'
 import { SSHPortForwardingModalComponent } from './components/sshPortForwardingModal.component'
 import { SSHPortForwardingConfigComponent } from './components/sshPortForwardingConfig.component'
@@ -53,6 +54,7 @@ import { SFTPCreateDirectoryModalComponent } from './components/sftpCreateDirect
     declarations: [
         WorkspaceFilesComponent,
         SSHProfileSettingsComponent,
+        SSHConnectModalComponent,
         SFTPDeleteModalComponent,
         SFTPCreateDirectoryModalComponent,
         SSHPortForwardingModalComponent,

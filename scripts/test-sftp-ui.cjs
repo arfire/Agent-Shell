@@ -47,6 +47,50 @@ exports.run = async ({ directory, evaluate, wait, screen }) => {
     assert.equal(await inZone('return (await sftpPanel.sftp.stat("/tmp/拖拽目录/拖拽.txt")).size'), Buffer.byteLength('拖拽文件内容'))
     console.log('PASS Electron HTML drag upload into nested folder')
 
+    const downloadDirectory=path.join(directory,'download-output')
+    fs.mkdirSync(downloadDirectory,{recursive:true})
+    await inZone(`
+        const platform=sftpPanel.platform
+        const pick=platform.pickDirectory, start=platform.startDownloadDirectory
+        platform.pickDirectory=async()=>${JSON.stringify(downloadDirectory)}
+        platform.startDownloadDirectory=async(...args)=>{window.folderTransfer=await start.apply(platform,args);return folderTransfer}
+        try {await sftpPanel.downloadFolder(await sftpPanel.sftp.stat('/tmp/拖拽目录'))}
+        finally {platform.pickDirectory=pick;platform.startDownloadDirectory=start}
+        return true
+    `)
+    assert.equal(fs.readFileSync(path.join(downloadDirectory,'拖拽目录','拖拽.txt'),'utf8'),'拖拽文件内容')
+    assert.equal(await evaluate('folderTransfer.isComplete()'),true)
+    assert.equal(await evaluate('folderTransfer.getCompletedBytes()'),Buffer.byteLength('拖拽文件内容'))
+    console.log('PASS Electron directory download: exact nested content and aggregate progress')
+
+    await inZone(`
+        const platform=sftpPanel.platform, core=require('tabby-core')
+        await sftpPanel.sftp.mkdir('/tmp/cancel-folder')
+        await sftpPanel.sftp.upload('/tmp/cancel-folder/large.bin',new core.HTMLFileUpload(new File([new Uint8Array(700000)],'large.bin')))
+        const pick=platform.pickDirectory,start=platform.startDownloadDirectory
+        platform.pickDirectory=async()=>${JSON.stringify(downloadDirectory)}
+        let cancellation
+        platform.startDownloadDirectory=async(...args)=>{
+            window.cancelFolderTransfer=await start.apply(platform,args)
+            const create=cancelFolderTransfer.createFile.bind(cancelFolderTransfer)
+            cancelFolderTransfer.createFile=async(...fileArgs)=>{
+                const file=await create(...fileArgs)
+                cancellation=file.progress$.subscribe(()=>cancelFolderTransfer.cancel())
+                return file
+            }
+            return cancelFolderTransfer
+        }
+        try {await sftpPanel.downloadFolder(await sftpPanel.sftp.stat('/tmp/cancel-folder'))}
+        finally {cancellation?.unsubscribe();platform.pickDirectory=pick;platform.startDownloadDirectory=start}
+        return true
+    `)
+    assert.equal(await evaluate('cancelFolderTransfer.isCancelled()'),true)
+    assert.equal(await evaluate('cancelFolderTransfer.isComplete()'),false)
+    assert.equal(await evaluate('cancelFolderTransfer.getError()'),'')
+    assert.ok(fs.statSync(path.join(downloadDirectory,'cancel-folder','large.bin')).size<700000)
+    assert.deepEqual(await evaluate('sftpNotices'),[],'Cancelled folder download raised an error')
+    console.log('PASS Electron directory cancellation stops the active file before completion')
+
     await inZone(`
         const core=require('tabby-core')
         const tree=new core.DirectoryUpload()
@@ -57,7 +101,7 @@ exports.run = async ({ directory, evaluate, wait, screen }) => {
     `)
     assert.equal(await evaluate('deniedTransfer.isComplete()'), false)
     assert.equal(await evaluate('deniedTransfer.isCancelled()'), true)
-    assert.match((await evaluate('sftpNotices')).join('\n'), /Permission denied/)
+    assert.match((await evaluate('sftpNotices')).join('\n'), /权限不足/)
     await screen('sftp-upload-error')
     console.log('PASS Electron upload error is visible and never marked successful')
     console.log('SFTP screenshots and isolated data:', directory)

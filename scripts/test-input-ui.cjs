@@ -1,13 +1,18 @@
-/* Isolated Electron + Docker SSH input profiling. No commands submitted by the probes. */
+/* Isolated Electron + Docker SSH input profiling. No remote commands submitted by the typing probes; analysis request uses an isolated model. */
 const assert = require('node:assert/strict')
 
 exports.run = async ({ evaluate, wait, screen, call }) => {
-    await evaluate(`ng.getComponent(document.querySelector('app-root')).app.selectTab(nativeTest); true`)
+    await evaluate(`ng.getComponent(document.querySelector('app-root')).app.selectTab(nativeTest.topmostParent ?? nativeTest); true`)
     await call('Page.bringToFront')
     await evaluate(`window.inputProbeText=()=>{
         const buffer=nativeTest.frontend.xterm.buffer.active
         return Array.from({length:buffer.cursorY+1},(_,i)=>buffer.getLine(buffer.baseY+i)?.translateToString(true,0,i===buffer.cursorY?buffer.cursorX:undefined)).join('')
     }; true`)
+    if (await evaluate('ng.getComponent(document.querySelector("ash-agent-dock")).runtime.independentExecution')) {
+        await require('./test-exec-input-ui.cjs').run({evaluate,wait,screen,call})
+        return
+    }
+
     for (const mode of ['agent', 'shell']) {
         await evaluate(`(async()=>{
             const dock=ng.getComponent(document.querySelector('ash-agent-dock'))
