@@ -10,7 +10,7 @@ const root = path.resolve(__dirname, '..')
 const directory = path.join(root, '.build-cache', 'agent-blackbox-' + Date.now())
 const docker = 'C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe'
 const name = 'ash-blackbox-' + crypto.randomBytes(6).toString('hex')
-const password = crypto.randomBytes(24).toString('hex')
+const password = process.env.ASH_TEST_SUDO_PASSWORD || crypto.randomBytes(24).toString('hex')
 const events = []
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 let electron, created = false, stopping = false, debugPort, controlPort
@@ -55,7 +55,19 @@ const model = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'text/event-stream' })
         const delta = value => res.write('data: ' + JSON.stringify({ choices: [{ delta: value }] }) + '\n\n')
         if (scenario === 'BB_BROKEN_STREAM') { delta({ content: '未完成片段' }); res.end(); return }
-        if (scenario === 'BB_RECOVER') {
+        if (scenario === 'BB_SUDO') {
+            const values = request.messages.filter(m => m.role === 'tool').map(m => JSON.parse(m.content))
+            let name = 'terminal_exec', args
+            if (!tool) { name = 'request_user_input'; args = { prompt: '临时服务器 sudo 密码', kind: 'secret', program: 'sudo', target: 'current-server' } }
+            else if (tool.value) {
+                args = { command: `printf '%s\\n' '${tool.value}' | sudo -S -v && sudo -n mkdir -p /opt/ash-gitea-ui/data && sudo -n chown ashbash:ashbash /opt/ash-gitea-ui`, reason: '在同一个执行通道验证 sudo 并创建部署目录' }
+            } else if (values.length === 2) {
+                args = { command: "cat > /opt/ash-gitea-ui/docker-compose.yml <<'EOF'\nservices:\n  gitea:\n    image: gitea/gitea:latest\n    environment:\n      - USER_UID=1000\nEOF\ntest -s /opt/ash-gitea-ui/docker-compose.yml", reason: '使用 heredoc 写入新部署配置' }
+            } else if (values.length === 3) {
+                args = { command: "python3 -c \"import pathlib; pathlib.Path('/opt/ash-gitea-ui/compose.python.yml').write_text('services: {}')\"", reason: '验证 Python 仅写入配置的正常路径' }
+            } else { delta({ content: 'BB_SUDO_DEPLOYMENT_OK' }) }
+            if (args) delta({ tool_calls: [{ index: 0, id: crypto.randomUUID(), type: 'function', function: { name, arguments: JSON.stringify(args) } }] })
+        } else if (scenario === 'BB_RECOVER') {
             const values = request.messages.filter(m => m.role === 'tool').map(m => JSON.parse(m.content))
             const credential = values.find(v => v.value)?.value
             let name = 'terminal_exec', args
@@ -90,9 +102,11 @@ const model = http.createServer(async (req, res) => {
 })
 function launch() {
     const log = fs.openSync(path.join(directory, 'electron.log'), 'a')
-    electron = spawn(path.join(root, 'node_modules/electron/dist/electron.exe'), [path.join(directory, 'bootstrap.cjs'), '--remote-debugging-port=' + debugPort], {
+    const packaged = process.env.ASH_TEST_PACKAGED_APP
+    const args = [...packaged ? [] : [path.join(directory, 'bootstrap.cjs')], '--remote-debugging-port=' + debugPort]
+    electron = spawn(packaged || path.join(root, 'node_modules/electron/dist/electron.exe'), args, {
         cwd: root, windowsHide: true, stdio: ['ignore', log, log],
-        env: { ...process.env, TABBY_DEV: '1', TABBY_DATA_DIRECTORY: directory, TABBY_CONFIG_DIRECTORY: directory },
+        env: { ...process.env, TABBY_DEV: packaged ? '' : '1', TABBY_DATA_DIRECTORY: directory, TABBY_CONFIG_DIRECTORY: directory },
     })
     fs.closeSync(log)
 }
@@ -119,6 +133,9 @@ const control = http.createServer(async (req, res) => {
 async function main() {
     dockerRun(['run', '-d', '--rm', '--name', name, '-p', '127.0.0.1::22', '-e', 'ASH_TEST_PASSWORD=' + password, 'ash-native-agent-test:local'])
     created = true
+    if (process.env.ASH_TEST_SUDO_PASSWORD) {
+        dockerRun(['exec', '-u', 'root', name, 'sh', '-c', 'apk add --no-cache sudo >/dev/null && mkdir -p /etc/sudoers.d && printf "%s\\n" "Defaults timestamp_type=ppid" "ashbash ALL=(ALL) ALL" > /etc/sudoers.d/ash-regression && chmod 440 /etc/sudoers.d/ash-regression'])
+    }
     dockerRun(['exec', '-d', name, 'python3', '-u', '-c', `
 from http.server import BaseHTTPRequestHandler, HTTPServer
 class Check(BaseHTTPRequestHandler):

@@ -3,14 +3,16 @@ export interface SecretBinding {
     target: string
 }
 
-/** A deliberately limited argument grammar; never expands shell or environment values. */
-export function literalArguments (source: string): string[]|undefined {
-    const result: string[] = []
+/** Sudo authentication and dependent operations must share one SSH process. */
+function literalCommands (source: string, allowAnd: boolean): string[][]|undefined {
+    const commands: string[][] = [[]]
+    let result = commands[0]
     let word = ''
     let quote = ''
     let escaped = false
     let started = false
-    for (const char of source) {
+    for (let index = 0; index < source.length; index++) {
+        const char = source[index]
         if (escaped) { word += char; escaped = false; started = true; continue }
         if (char === '\\' && quote !== '\'') { escaped = true; continue }
         if (quote) {
@@ -23,13 +25,26 @@ export function literalArguments (source: string): string[]|undefined {
             if (started) { result.push(word); word = ''; started = false }
             continue
         }
+        if (allowAnd && char === '&' && source[index + 1] === '&') {
+            if (started) { result.push(word); word = ''; started = false }
+            if (!result.length) { return undefined }
+            result = []
+            commands.push(result)
+            index++
+            continue
+        }
         if (/[;|&<>`$(){}]/.test(char)) { return undefined }
         word += char
         started = true
     }
     if (quote || escaped) { return undefined }
     if (started) { result.push(word) }
-    return result
+    return commands.length > 1 && !result.length ? undefined : commands
+}
+
+/** A deliberately limited argument grammar; never expands shell or environment values. */
+export function literalArguments (source: string): string[]|undefined {
+    return literalCommands(source, false)?.[0]
 }
 
 export function validateSecretBinding (program: unknown, target: unknown): SecretBinding|undefined {
@@ -54,18 +69,23 @@ export function boundSecretReason (command: string, binding: SecretBinding): str
     if (binding.program === 'sudo') {
         // The only allowed secret pipeline delivers a password directly to sudo stdin.
         const pipe = /^printf\s+(?:'%s(?:\\n)?'|"%s(?:\\n)?")\s+['"]?__TABBY_SENSITIVE_\d+__['"]?\s*\|\s*(sudo\s+-S\b[\s\S]*)$/.exec(source)
-        if (!pipe) { return 'sudo 密码只允许通过 printf 直接传入 sudo -S；不能打印、写文件或交给其他程序。' }
+        if (!pipe) { return '请用 printf \'%s\\n\' 占位符 | sudo -S -v && sudo -n 操作，在同一次 terminal_exec 中验证并执行。不要同时使用 -k 和 -v，密码只传给 sudo 验证。' }
         source = pipe[1]
+        const commands = literalCommands(source, true)
+        const validation = commands?.[0]
+        const allowed = new Set(['sudo', '-S', '-v', '-p', ''])
+        if (!validation?.includes('-S') || !validation.includes('-v') || !validation.every(arg => allowed.has(arg))) {
+            return '请在同一次 terminal_exec 中使用 printf \'%s\\n\' 占位符 | sudo -S -v && sudo -n 操作；-k 与 -v 同时使用不会保存验证状态，也不能把验证和操作分成两条调用。'
+        }
+        if (commands!.slice(1).some(args => args[0] !== 'sudo' || args[1] !== '-n' || args.length < 3 || args.some(arg => /__TABBY_SENSITIVE_\d+__/.test(arg)))) {
+            return 'sudo 验证后只允许用 && 连接 sudo -n 操作，操作中不再携带密码。不要添加输出管道或重定向。'
+        }
+        return undefined
     }
     const args = literalArguments(source)
     if (!args?.length) { return '带凭据的命令只能是可检查的单一目标程序调用，不能使用变量、重定向或复合命令。' }
     while (/^(?:MYSQL_PWD|PGPASSWORD)=__TABBY_SENSITIVE_\d+__$/.test(args[0] ?? '')) { args.shift() }
     if (args[0] !== binding.program) { return '本地凭据已绑定到 ' + binding.program + '，不能转交其他程序。' }
-    if (binding.program === 'sudo') {
-        const allowed = new Set(['sudo', '-S', '-k', '-v', '-p', ''])
-        return args.includes('-S') && args.includes('-k') && args.includes('-v') && args.every(arg => allowed.has(arg))
-            ? undefined : 'sudo 密码只用于 sudo -S -k -v 验证。验证后单独使用 sudo -n 执行操作，不把密码标准输入交给子程序。'
-    }
     if (['curl', 'wget'].includes(binding.program)) {
         if (binding.program === 'curl' && (!['-q', '--disable'].includes(args[1]) ||
             !args.some((arg, index) => arg === '--noproxy=*' || arg === '--noproxy' && args[index + 1] === '*'))) {

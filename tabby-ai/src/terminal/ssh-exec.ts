@@ -25,7 +25,10 @@ export function execEnvelope (command: string, shell: ShellKind, marker: string)
         const quoted = command.replace(/\\/g, '\\\\').replace(/'/g, '\\\'')
         return `env TERM=dumb PAGER=cat SYSTEMD_PAGER=cat GIT_PAGER=cat fish -c '${quoted}'; set -l ash_exit $status; printf '${marker}:%s\\007' $ash_exit; sleep 0.1`
     }
-    return `(export TERM=dumb PAGER=cat SYSTEMD_PAGER=cat GIT_PAGER=cat;\n${command}\n); ash_exit=$?; printf '${marker}:%s\\007' "$ash_exit"; sleep 0.1`
+    // Zsh may exec the last command of a subshell, changing the PPID used by
+    // non-PTY sudo timestamps. Preserve the parent and the original exit code.
+    const finish = shell === 'zsh' ? '\nash_exec_exit=$?; exit "$ash_exec_exit"' : ''
+    return `(export TERM=dumb PAGER=cat SYSTEMD_PAGER=cat GIT_PAGER=cat;\n${command}${finish}\n); ash_exit=$?; printf '${marker}:%s\\007' "$ash_exit"; sleep 0.1`
 }
 
 export async function executeSSH (

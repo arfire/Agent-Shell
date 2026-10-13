@@ -38,7 +38,7 @@ export function credentialAccessReason (command: string, mode: ApprovalMode = 'c
         return '不能通过脚本反射访问环境或隐藏数据。请使用明确的环境状态查询或本地凭据表单。'
     }
     if (/\b(?:python\d*|node|perl|ruby)\b[^\r\n]*\s-(?:c|e)\b/.test(normalized) &&
-        /\b(?:open|readFile|readFileSync|read_text|read_bytes|pathlib|iterdir|listdir|walk|glob)\b/.test(normalized)) {
+        /\b(?:open|readFile|readFileSync|read_text|read_bytes|iterdir|listdir|walk|glob)\b/.test(normalized)) {
         return '脚本不能直接读取文件内容。需要配置时请使用 configuration_status 获取字段状态或公开端口；已有配置可由应用直接使用。'
     }
     if (opaqueConfigurationCommand(command)) { return undefined }
@@ -46,13 +46,23 @@ export function credentialAccessReason (command: string, mode: ApprovalMode = 'c
     if (path.test(normalized)) {
         return 'Agent 不得访问凭据文件。需要密码或密钥时，请调用 request_user_input(kind="secret")，只索取本次操作需要的值。'
     }
+    const validation = literalArguments(command.trim())
+    if (validation?.[0] === 'docker' && validation[1] === 'compose') {
+        let index = 2
+        if (['-f', '--file'].includes(validation[index])) { index += 2 }
+        if (validation[index] === 'config' && ['-q', '--quiet'].includes(validation[index + 1]) && validation.length === index + 2) { return undefined }
+    }
     const environment = /\b(?:printenv|GetEnvironmentVariables?|GetEnvironmentVariable|os\.environ|getenv|process\.env|System\.getenv)\b|(?:^|[\s;|&])(?:env|set|export|declare|typeset)(?:\s+-[a-zA-Z0-9]+)*(?=\s*(?:$|[;|&]))|\b(?:Get-ChildItem|gci|dir|Get-Item|Get-Content)\s+(?:-[\w-]+\s+)*env:|\$env:/i
     const secretVariable = /(?:\$\{?|%)[\w]*(?:password|passwd|pwd|token|secret|api_?key|private_?key|access_?key)[\w]*(?:\}|%)?|\b(?:get|list|show|retrieve)[-_ ]?(?:password|secret|credential)s?\b/i
     const exports = /\b(?:docker|podman)\b[^\r\n;|&]*\b(?:inspect|config)\b|\b(?:docker-compose|podman-compose)\b[^\r\n;|&]*\bconfig\b|\bkubectl\b[^\r\n;|&]*\b(?:secrets?|config\s+view)\b|\b(?:aws|az|gcloud|vault|op|bw|security|cmdkey|secret-tool)\b[^\r\n;|&]*\b(?:secrets?\b|secretsmanager|ssm|get-password|credential|lookup|find-generic-password|find-internet-password|read\b)|\b(?:systemctl\s+show|ps\s+[^\r\n]*e[fw]|docker\s+exec[^\r\n]*\benv)\b|\bmysql\.(?:user|global_priv)\b|\bpg_authid\b/i
     const search = /\b(?:grep|rg|ag|findstr|Select-String|jq|yq|aws|az|gcloud|vault|op|bw)\b[^\r\n;]*\b[\w.-]*(?:password|passwd|token|secret|credential|api_?key|private_?key)[\w.-]*\b|\b(?:169\.254\.169\.254|169\.254\.170\.2|metadata\.google\.internal)\b|\b(?:Get-Credential|Get-StoredCredential|Get-Secret|keyring|keytar)\b|\.(?:git-credentials|bash_history|zsh_history|psql_history|mysql_history)\b/i
     const configPath = /\b(?:config|settings|appsettings|application|docker-compose|compose)[\w.-]*\.(?:ya?ml|json|ini|conf|toml|properties)\b/i
-    const configRead = /\b(?:cat|head|tail|less|more|Get-Content|type|grep|rg|Select-String|jq|yq|awk|sed|cp|scp|rsync|tar|zip)\s|\b(?:open|readFileSync|readFile|read_text|read_bytes)\s*\(/i
-    const bulkConfig = configPath.test(normalized) && configRead.test(normalized)
+    const configReads = [...command.matchAll(/\b(?:cat|head|tail|less|more|Get-Content|type|grep|rg|Select-String|jq|yq|awk|sed|cp|scp|rsync|tar|zip)\b([^;\r\n|]*)/gi)]
+    // Output files and heredoc delimiters are not input files.
+    const bulkConfig = configReads.some(match => {
+        const inputs = match[1].replace(/(?:\d*>>?|\d*<<-?)\s*(?:"[^"]*"|'[^']*'|[^\s;&|]+)/g, '').replace(/["']/g, '')
+        return configPath.test(inputs) || configPath.test(inputs.replace(/\\(?=[.\w])/g, ''))
+    })
     if (environment.test(normalized) || secretVariable.test(normalized) || exports.test(normalized) || search.test(normalized) || bulkConfig) {
         return 'Agent 不得自行提取环境变量、容器配置、凭据存储或数据库认证信息。请使用 request_user_input(kind="secret") 获取必要凭据。'
     }

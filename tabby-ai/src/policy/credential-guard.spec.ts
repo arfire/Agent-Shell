@@ -9,6 +9,21 @@ import { AIConfig } from '../config/config-schema'
 import { AISessionCaptureMiddleware } from '../terminal/session-capture.middleware'
 
 export async function runTests (test: (name: string, run: () => Promise<void>) => Promise<void>, defaults: AIConfig): Promise<void> {
+    await test('writing deployment configuration is distinct from reading existing configuration', async () => {
+        const compose = 'mkdir -p /opt/gitea/data && cat > /opt/gitea/docker-compose.yml <<\'EOF\'\nservices:\n  gitea:\n    image: gitea/gitea:latest\n    environment:\n      - USER_UID=1000\nEOF\necho "配置文件已创建"'
+        const python = 'python3 -c "import pathlib; pathlib.Path(\'/home/hehong/gitea/docker-compose.yml\').write_text(\'services: {}\'); print(\'OK\')"'
+        for (const mode of ['configured', 'auto', 'full', 'unrestricted'] as const) {
+            for (const command of [compose, python, 'cat <<\'EOF\' > /tmp/compose.yaml\nservices: {}\nEOF',
+                'docker compose -f /home/hehong/gitea/docker-compose.yml config --quiet', 'docker compose config -q']) {
+                assert.equal(credentialAccessReason(command, mode), undefined, command)
+            }
+        }
+        for (const command of ['cat /tmp/compose.yaml > /tmp/copy.txt', 'cat < /tmp/compose.yaml', 'cat appsett""ings.json', 'cat appsett\\ings.json',
+            'python3 -c "import pathlib; print(pathlib.Path(\'compose.yaml\').read_text())"',
+            'docker compose -f /tmp/compose.yaml config --quiet; cat .env', 'docker compose config']) {
+            assert.ok(credentialAccessReason(command), command)
+        }
+    })
     await test('heredoc rejection identifies inspected syntax instead of claiming a blanket heredoc ban', async () => {
         assert.equal(credentialAccessReason('sudo tee /tmp/UPDATE.md <<\'EOF\'\nUpdate instructions\nEOF'), undefined)
         const reason = credentialAccessReason('sudo tee /tmp/update.sh <<\'EOF\'\nprintf \'%s\' "${APP_DIR}"\nEOF')

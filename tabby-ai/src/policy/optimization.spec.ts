@@ -65,6 +65,20 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
         first.clear()
         assert.throws(() => first.restoreCommand('echo ' + token), /失效/)
     })
+    await test('sudo authentication and dependent operations can share one SSH execution', async () => {
+        const sudo = validateSecretBinding('sudo', 'current-server')!
+        const validation = 'printf \'%s\\n\' \'__TABBY_SENSITIVE_1__\' | sudo -S -v'
+        for (const command of [validation,
+            validation + ' && sudo -n mkdir -p /opt/gitea/data && sudo -n chown user:user /opt/gitea',
+            validation + ' && sudo -n mkdir -p \'/tmp/path && literal\'']) {
+            assert.equal(boundSecretReason(command, sudo), undefined, command)
+        }
+        for (const command of [validation.replace('-S -v', '-S -k -v'), validation + ' 2>&1 | tail -1', validation + ' && echo __TABBY_SENSITIVE_1__',
+            validation + ' && sudo -n echo __TABBY_SENSITIVE_1__', validation + ' && sudo -n mkdir /tmp/test; echo done',
+            validation + ' && sudo -n mkdir $(whoami)', validation + ' &&', validation + ' || sudo -n true']) {
+            assert.ok(boundSecretReason(command, sudo), command)
+        }
+    })
     await test('configuration projection returns presence and validated public values while dropping arbitrary secret output', async () => {
         const keys = ['APP_PORT', 'DB_PASSWORD', 'DEBUG']
         const summary = configurationSummary(JSON.stringify({ fields: [
