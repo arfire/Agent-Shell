@@ -7672,10 +7672,10 @@ uuid@^3.3.2:
   resolved "https://registry.npmjs.org/uuid/-/uuid-3.4.0.tgz"
   integrity sha512-HjSDRw6gZE5JMggctHBcjVak08+KEVhSIiDzFnT9S9aegmp85S/bReBVTb4QTFaRNptJ9kuYaNhnbNEOkbKb/A==
 
-val-loader@5.0.1:
-  version "5.0.1"
-  resolved "https://registry.yarnpkg.com/val-loader/-/val-loader-5.0.1.tgz#ce29d3bbe68381f42bef0d693d0f18202fe5efe8"
-  integrity sha512-r4h7b9AuvGQU1vyC4rAMoJNMG8fJUE6CYAqlM265tOdnZrZC6axVawBg2GlQ9+6osPCJjw4/vyADiSBAFlhzlg==
+val-loader@6.0.0:
+  version "6.0.0"
+  resolved "https://registry.yarnpkg.com/val-loader/-/val-loader-6.0.0.tgz#88078512fdb66e04deab659fec05e281105e4d81"
+  integrity sha512-NHi81ow+/mVBRuFRNxp8tfTSnAIFsq/wzZGqxv/a82Y722GQSOQi9yP0GuenSBiuw4+zGjmW/H9sLTbP3bewrw==
 
 validate-npm-package-license@^3.0.1:
   version "3.0.4"
