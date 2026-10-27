@@ -55,7 +55,24 @@ const model = http.createServer(async (req, res) => {
         res.writeHead(200, { 'Content-Type': 'text/event-stream' })
         const delta = value => res.write('data: ' + JSON.stringify({ choices: [{ delta: value }] }) + '\n\n')
         if (scenario === 'BB_BROKEN_STREAM') { delta({ content: '未完成片段' }); res.end(); return }
-        if (scenario === 'BB_SUDO') {
+        if (scenario === 'BB_CONFIG') {
+            const values = request.messages.filter(m => m.role === 'tool').map(m => JSON.parse(m.content))
+            let name = 'configuration_file', args
+            const file = '/tmp/ash-config-project/compose.yml'
+            if (!tool) { args = { operation: 'read', path: file } }
+            else if (values.length === 1) {
+                args = { operation: 'apply', path: file, revision: tool.revision, changes: [{ path: ['services','gitea','ports',0], value: '3001:3000' }, { path: ['services','gitea','environment','GITEA__server__ROOT_URL'], value: 'http://192.168.1.190:3001/' }] }
+            } else if (values.length === 2) {
+                name = 'request_user_input'
+                args = { prompt: '临时部署测试的新服务密码', kind: 'secret', program: 'configuration', target: file + '#/services/gitea/environment/NEW_PASSWORD' }
+            } else if (tool.value) {
+                args = { operation: 'apply', path: file, revision: values[1].revision, changes: [{ path: ['services','gitea','environment','NEW_PASSWORD'], value: tool.value }] }
+            } else if (values.length === 4) {
+                name = 'terminal_exec'
+                args = { command: "cd /tmp/ash-config-project && tar --version | head -1; cd /tmp/ash-config-project && tar -cf release.tar sample.txt && mkdir -p extracted && tar -xf release.tar -C extracted && APP_DIR=/tmp/ash-config-project && grep '[.]' \"$APP_DIR/sample.txt\" && python3 -c \"from pathlib import Path; print(Path('/tmp/ash-config-project/sample.txt').read_text())\" && sh /tmp/ash-config-project/run.sh", reason: '验证正常压缩、解压、搜索表达式、变量和公开文件脚本读取' }
+            } else { delta({ content: 'BB_CONFIG_DEPLOYMENT_OK' }) }
+            if (args) delta({ tool_calls: [{ index: 0, id: crypto.randomUUID(), type: 'function', function: { name, arguments: JSON.stringify(args) } }] })
+        } else if (scenario === 'BB_SUDO') {
             const values = request.messages.filter(m => m.role === 'tool').map(m => JSON.parse(m.content))
             let name = 'terminal_exec', args
             if (!tool) { name = 'request_user_input'; args = { prompt: '临时服务器 sudo 密码', kind: 'secret', program: 'sudo', target: 'current-server' } }
@@ -134,7 +151,8 @@ async function main() {
     dockerRun(['run', '-d', '--rm', '--name', name, '-p', '127.0.0.1::22', '-e', 'ASH_TEST_PASSWORD=' + password, 'ash-native-agent-test:local'])
     created = true
     if (process.env.ASH_TEST_SUDO_PASSWORD) {
-        dockerRun(['exec', '-u', 'root', name, 'sh', '-c', 'apk add --no-cache sudo >/dev/null && mkdir -p /etc/sudoers.d && printf "%s\\n" "Defaults timestamp_type=ppid" "ashbash ALL=(ALL) ALL" > /etc/sudoers.d/ash-regression && chmod 440 /etc/sudoers.d/ash-regression'])
+        dockerRun(['exec', '-u', 'root', name, 'sh', '-c', 'apk add --no-cache sudo tar >/dev/null && mkdir -p /etc/sudoers.d && printf "%s\\n" "Defaults timestamp_type=ppid" "ashbash ALL=(ALL) ALL" > /etc/sudoers.d/ash-regression && chmod 440 /etc/sudoers.d/ash-regression'])
+        dockerRun(['exec', '-u', 'ashbash', name, 'sh', '-c', "mkdir -p /tmp/ash-config-project && printf '%s\\n' '# CONFIG_COMMENT_CANARY' 'services:' '  gitea:' '    image: gitea/gitea:latest' '    ports: [\"3000:3000\"]' '    environment:' '      GITEA__server__ROOT_URL: http://192.168.1.190:3000/' '      USER_UID: \"1000\"' '      DB_PASSWORD: CONFIG_OLD_SECRET_CANARY' '      UNKNOWN: CONFIG_UNKNOWN_CANARY' > /tmp/ash-config-project/compose.yml && printf '%s\\n' 'version=1.0' > /tmp/ash-config-project/sample.txt && printf '%s\\n' 'echo CONFIG_OLD_SECRET_CANARY' > /tmp/ash-config-project/run.sh"])
     }
     dockerRun(['exec', '-d', name, 'python3', '-u', '-c', `
 from http.server import BaseHTTPRequestHandler, HTTPServer

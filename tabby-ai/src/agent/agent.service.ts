@@ -16,8 +16,9 @@ import { AgentRunQueue } from './run-queue'
 import { AgentPermissionsService, approvalAction, CommandAuthorization, permissionInstructions } from '../policy/agent-permissions.service'
 import { credentialAccessReason, opaqueConfigurationCommand } from '../policy/credential-guard'
 import { taskCommandReason, taskRestrictions } from '../policy/task-boundary'
-import { validateSecretBinding } from '../policy/secret-binding'
-import { CONFIGURATION_TOOL, configurationCommand, configurationRoots, configurationSummary, projectPaths, validConfigurationKeys } from './configuration-inspection'
+import { literalArguments, validateSecretBinding } from '../policy/secret-binding'
+import { CONFIGURATION_TOOL, ConfigurationSession, configurationModeCommand, configurationRoots, projectPaths } from './configuration-inspection'
+import { ConfigurationChange, ConfigurationError, configurationPointer, configurationRisk, validConfigurationPath } from './configuration-document'
 import { commandRiskDescription } from '../policy/command-description'
 import { WebService, WebRunState } from '../web/web.service'
 
@@ -46,8 +47,8 @@ const TERMINAL_TOOLS: ChatTool[] = [{
             properties: {
                 prompt: { type: 'string', description: 'A concise question shown to the user.' },
                 kind: { type: 'string', 'enum': ['text', 'secret'], description: 'Use secret for credentials and tokens. In restricted modes program and target are required and enforced locally; unrestricted mode has no destination binding.' },
-                program: { type: 'string', description: 'For secret: curl, wget, mysql, mariadb, mysqldump, psql, pg_dump or sudo.' },
-                target: { type: 'string', description: 'For secret: HTTP(S) service origin, database host (localhost if local), or current-server for sudo. Shown to the user before accepting the secret.' },
+                program: { type: 'string', description: 'For secret: curl, wget, mysql, mariadb, mysqldump, psql, pg_dump, sudo or configuration.' },
+                target: { type: 'string', description: 'HTTP(S) origin, database host, current-server for sudo, or absolute configuration file followed by #/JSON/pointer for configuration. Shown before accepting the secret.' },
             },
             required: ['prompt', 'kind'],
             additionalProperties: false,
@@ -78,6 +79,8 @@ interface ActiveRun {
     executingAuthorization?: CommandAuthorization
     interruptedExecution?: boolean
     projectPaths?: string[]
+    configuration?: ConfigurationSession
+    configurationMode?: string
 }
 
 class UserRejectedError extends Error { }
@@ -190,6 +193,7 @@ export class AgentService {
             release?.()
             this.interactions.cancelRun(run.id)
             this.activeRuns.delete(runtime.id)
+            run.configuration?.clear()
             runtime.activeRunId = undefined
             runtime.stopAgent = undefined
             runtime.handoffAgent = undefined
@@ -315,7 +319,7 @@ export class AgentService {
                 await this.sessions.append(runtime, 'web-activity', event, run.id)
             })
         }
-        if (toolCall.function.name === 'configuration_status') { return this.inspectConfiguration(runtime, run, toolCall) }
+        if (toolCall.function.name === 'configuration_file') { return this.inspectConfiguration(runtime, run, toolCall) }
         if (toolCall.function.name === 'request_user_input') {
             return this.requestUserInput(runtime, run, toolCall)
         }
@@ -330,6 +334,14 @@ export class AgentService {
         }
         if (typeof argumentsValue.command !== 'string' || typeof argumentsValue.reason !== 'string') {
             return JSON.stringify({ error: 'terminal_exec requires string command and reason fields' })
+        }
+        const read = literalArguments(argumentsValue.command)
+        if (this.permissions.mode(runtime) !== 'unrestricted' && read?.length === 2 && ['cat', 'type'].includes(read[0]) &&
+            /(?:\/\.env(?:\.[\w-]+)?|\.(?:ya?ml|json|env))$/i.test(read[1]) && (await this.configurationRoots(runtime, run, read[1])).length) {
+            return this.inspectConfiguration(runtime, run, {
+                ...toolCall,
+                'function': { name: 'configuration_file', arguments: JSON.stringify({ operation: 'read', path: read[1] }) },
+            })
         }
         const taskError = this.permissions.mode(runtime) === 'unrestricted' ? undefined : taskCommandReason(run.goal, argumentsValue.command, run.operationFailed)
         if (taskError) { throw new CommandBlockedError(taskError, argumentsValue.command) }
@@ -512,33 +524,84 @@ export class AgentService {
         }
     }
 
+    private async configurationRoots (runtime: AISessionRuntime, run: ActiveRun, file: unknown): Promise<string[]> {
+        let cwd: string|null = null
+        try { cwd = await runtime.tab.session?.getWorkingDirectory() ?? null } catch { /* Explicit project paths still work. */ }
+        return configurationRoots(file, String(run.goal), [...run.projectPaths ?? [], ...cwd ? [cwd] : []])
+    }
+
     private async inspectConfiguration (runtime: AISessionRuntime, run: ActiveRun, tool: ToolCall): Promise<string> {
         const mode = this.permissions.mode(runtime)
         if (mode !== 'unrestricted' && !taskRestrictions(run.goal).commands) { return JSON.stringify({ error: '当前任务不允许服务器操作，配置检查未执行。' }) }
-        let args: { path?: unknown, keys?: unknown } = {}
+        let args: { path?: unknown, operation?: unknown, revision?: unknown, changes?: ConfigurationChange[] } = {}
         try { args = JSON.parse(tool.function.arguments) } catch { return JSON.stringify({ error: '配置检查参数无效。' }) }
-        const roots = configurationRoots(args.path, run.goal, run.projectPaths)
-        if (!roots.length || !validConfigurationKeys(args.keys) || typeof args.path !== 'string') {
-            return JSON.stringify({ error: '请先让用户提供项目目录，并仅检查该目录中的明确配置路径和所需字段名。' })
+        const roots = await this.configurationRoots(runtime, run, args.path)
+        if (!roots.length || typeof args.path !== 'string' || !['read', 'apply'].includes(String(args.operation))) {
+            return JSON.stringify({ error: '请使用项目目录或当前 SSH 工作目录中的 YAML、JSON 或环境变量文件，并指定 read 或 apply。' })
         }
-        const command = configurationCommand(args.path, args.keys, roots, runtime.shellKind ?? 'bash')
-        let raw = ''
-        const filter = Object.assign((content: string) => { raw += content; if (raw.length > 65536) { raw = '[INVALID_RESULT]' } return '' }, { flush: () => '' })
-        runtime.state.next('EXECUTING')
-        await this.sessions.append(runtime, 'ai-message', { content: '检查项目配置字段是否齐全，密码和令牌内容不会发给模型。' }, run.id)
-        if (!runtime.independentExecution) { await this.presenter.interrupt(run.id) }
-        try {
-            const result = await this.terminal.execute(runtime, command, undefined, run.controller.signal, filter, () => {
-                if (this.isStopped(run) || runtime.tab.session !== run.session || this.permissions.mode(runtime) !== mode) { throw new Error('连接、任务或权限已变化，配置检查未执行') }
-            })
-            const summary = result.exitCode === 0 ? configurationSummary(raw, args.keys) : { error: '配置检查不可用，请确认服务器 python3 可用；已有配置仍可由应用直接使用。' }
-            await this.sessions.append(runtime, 'ssh-output', { content: JSON.stringify(summary), source: 'configuration-status' }, run.id)
-            return JSON.stringify(summary)
-        } finally {
-            raw = ''
-            if (!run.stopRequested && !run.controller.signal.aborted) {
-                await this.presenter.open(runtime, run.id, () => this.stop(runtime), this.nextEventSeq(runtime))
+        const write = args.operation === 'apply'
+        if (write && (typeof args.revision !== 'string' || !Array.isArray(args.changes))) { return JSON.stringify({ error: '修改需要 read 返回的 revision 和字段 changes。' }) }
+        const candidateChanges: unknown = args.changes
+        if (write && (!Array.isArray(candidateChanges) || candidateChanges.some(change => !change || !validConfigurationPath(change.path)))) {
+            return JSON.stringify({ error: '请提供有效的字段路径和修改值。' })
+        }
+        if (write && mode !== 'unrestricted' && !taskRestrictions(run.goal, run.operationFailed).changes) {
+            return JSON.stringify({ error: '本次任务明确只读，配置未修改。' })
+        }
+        const check = (): void => {
+            if (this.isStopped(run) || runtime.tab.session !== run.session || this.permissions.mode(runtime) !== mode) { throw new Error('连接、任务或权限已变化，配置操作停止。') }
+        }
+        check()
+        if (write) {
+            const risk = configurationRisk(args.changes!)
+            if (approvalAction(risk, mode) === 'ask') {
+                runtime.state.next('WAITING_APPROVAL')
+                const command = 'configuration_file apply ' + args.path
+                const response = await this.interactions.request({
+                    sessionId: runtime.id, connectionId: runtime.connectionId, runId: run.id, command,
+                    reason: '原文件保留备份。字段修改：\n' + args.changes!.map(change => configurationPointer(change.path) + ' → ' +
+                        (/__TABBY_SENSITIVE_\d+__/.test(JSON.stringify(change.value)) ? '[本地密码]' : run.sensitive.protect(JSON.stringify(change.value)))).join('\n'),
+                    riskDescription: risk === 'DANGEROUS' ? '会改变服务执行方式、挂载或权限。' : '会修改部署配置文件。',
+                    risk, confirmationsRequired: risk === 'DANGEROUS' ? 2 : 1,
+                })
+                if (!response.approved) { throw new UserRejectedError('你已拒绝配置修改，本轮已结束。') }
+                if (response.command !== command) { return JSON.stringify({ error: '配置修改不能通过编辑审批命令改变目标，请重新提交字段修改。' }) }
+                check()
             }
+        }
+        runtime.state.next('EXECUTING')
+        try {
+            if (!run.configuration || run.configurationMode !== mode) {
+                const files = await runtime.tab.sshSession!.openSFTP()
+                run.configuration?.clear()
+                run.configurationMode = mode
+                run.configuration = new ConfigurationSession(files, check, async (file, modeValue) => {
+                    check()
+                    const result = await this.terminal.execute(runtime, configurationModeCommand(file, modeValue, runtime.shellKind ?? 'bash'),
+                        undefined, run.controller.signal, undefined, check)
+                    if (result.exitCode !== 0) { throw new ConfigurationError('配置文件权限设置失败，原文件未覆盖。') }
+                }, value => { run.sensitive.register(value) }, mode === 'unrestricted')
+            }
+            check()
+            const result = write
+                ? await run.configuration.apply(args.path, args.revision as string, args.changes!, roots, (value, parts) => {
+                    try { return mode === 'unrestricted' ? run.sensitive.restore(value) : run.sensitive.configurationValue(value, args.path as string, parts) } catch {
+                        throw new ConfigurationError('密码只能写入密码框中绑定的文件和字段，请使用对应占位符。')
+                    }
+                })
+                : await run.configuration.read(args.path, roots)
+            check()
+            const output = run.sensitive.protect(JSON.stringify(result))
+            await this.sessions.append(runtime, 'model-output', { content: output, exitCode: 0, source: 'configuration-file' }, run.id)
+            return output
+        } catch (error) {
+            if (this.isStopped(run)) { throw error }
+            // SFTP and parser errors may embed source data; only our fixed messages leave this boundary.
+            const message = error instanceof ConfigurationError
+                ? error.message : '配置操作失败，请检查文件权限、格式和 SFTP 连接；错误原文未外发。'
+            return JSON.stringify({ error: message })
+        } finally {
+            if (!run.stopRequested) { runtime.state.next('THINKING') }
         }
     }
 
@@ -556,6 +619,9 @@ export class AgentService {
         const binding = argumentsValue.kind === 'secret' && !unrestricted ? validateSecretBinding(argumentsValue.program, argumentsValue.target) : undefined
         if (argumentsValue.kind === 'secret' && !unrestricted && (!binding || !taskRestrictions(run.goal).commands)) {
             return JSON.stringify({ error: '本地密码框必须明确 program 和 target，且当前任务需要执行操作。不要索取无用途的秘密。' })
+        }
+        if (binding?.program === 'configuration' && !(await this.configurationRoots(runtime, run, binding.target.split('#')[0])).length) {
+            return JSON.stringify({ error: '配置密码必须绑定到本次项目或当前 SSH 工作目录内的具体配置字段。' })
         }
         runtime.state.next('WAITING_INTERACTION')
         const form = await this.interactions.requestForm({

@@ -24,13 +24,15 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
             assert.ok(credentialAccessReason(command), command)
         }
     })
-    await test('heredoc rejection identifies inspected syntax instead of claiming a blanket heredoc ban', async () => {
-        assert.equal(credentialAccessReason('sudo tee /tmp/UPDATE.md <<\'EOF\'\nUpdate instructions\nEOF'), undefined)
-        const reason = credentialAccessReason('sudo tee /tmp/update.sh <<\'EOF\'\nprintf \'%s\' "${APP_DIR}"\nEOF')
-        assert.match(reason ?? '', /语法“\$\{”/)
-        assert.match(reason ?? '', /并非一律禁止 heredoc/)
-        assert.match(reason ?? '', /本次命令未执行/)
-        assert.match(reason ?? '', /不要建议用户手动绕过/)
+    await test('normal archives, diagnostics and public shell syntax are not credential access', async () => {
+        for (const command of ['tar --version', 'tar -xf release.tar -C /tmp/app', 'tar cf /tmp/release.tar /srv/app',
+            'cat /var/log/*.log', 'grep "[ERROR]" /var/log/app.log', 'rg -i password /app', 'cat "$APP_DIR/README.md"',
+            'echo "${APP_DIR}"', 'echo "$PWD"', 'printf hello | base64',
+            'docker inspect --format "{{.State.Status}}" gitea',
+            'python3 -c "print(open(\'/tmp/README.md\').read())"',
+            'python -c "exec(code)"', 'sh -c "eval $code"', 'powershell -EncodedCommand ZQB4AGkAdAA=']) {
+            assert.equal(credentialAccessReason(command), undefined, command)
+        }
     })
     const blocked = [
         'grep -E "MYSQL_ROOT_PASSWORD|MYSQL_PASSWORD" .env', 'cat /app/.env.production',
@@ -44,12 +46,11 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
         'docker inspect mysql', 'podman container inspect mysql', 'docker compose config',
         'docker exec db printenv', 'kubectl get secret/db -o yaml', 'kubectl config view --raw',
         'aws secretsmanager get-secret-value --secret-id db', 'aws configure get aws_secret_access_key',
-        'az account get-access-token', 'vault kv get secret/db', 'rg -i password /app',
+        'az account get-access-token', 'vault kv get secret/db',
         'cat appsettings.json', 'curl http://169.254.169.254/latest/meta-data/iam/security-credentials/',
         'jq .services docker-compose.yml', 'yq .database application.yaml', 'rg host settings.ini',
         'python -c "print(open(\'settings.toml\').read())"', 'cp application.yaml /tmp/public.txt',
         'mysql -e "SELECT * FROM mysql.user"', 'psql -c "SELECT * FROM pg_authid"',
-        'python -c "exec(code)"', 'sh -c "eval $code"', 'powershell -EncodedCommand ZQB4AGkAdAA=',
         'python -c "print(open(\'.\'+\'env\').read())"', 'printf Y2F0IC5lbnY= | base64 -d | sh',
         'mysql -u root -p123456 db -e "SHOW TABLES"', 'mysql --password=guess', 'MYSQL_PWD=guess mysql',
     ]

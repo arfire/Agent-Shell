@@ -3,7 +3,7 @@ import { taskCommandReason, taskRestrictions } from './task-boundary'
 import { boundSecretReason, validateSecretBinding } from './secret-binding'
 import { credentialAccessReason } from './credential-guard'
 import { SecretRedactor } from './secret-redactor'
-import { configurationCommand, configurationRoots, configurationSummary, validConfigurationKeys } from '../agent/configuration-inspection'
+import { configurationRoots } from '../agent/configuration-inspection'
 import { AIConfig } from '../config/config-schema'
 
 export async function runTests (test: (name: string, run: () => Promise<void>) => Promise<void>, defaults: AIConfig): Promise<void> {
@@ -79,21 +79,12 @@ export async function runTests (test: (name: string, run: () => Promise<void>) =
             assert.ok(boundSecretReason(command, sudo), command)
         }
     })
-    await test('configuration projection returns presence and validated public values while dropping arbitrary secret output', async () => {
-        const keys = ['APP_PORT', 'DB_PASSWORD', 'DEBUG']
-        const summary = configurationSummary(JSON.stringify({ fields: [
-            { name: 'APP_PORT', configured: true, publicValue: 18080, value: 'synthetic-secret' },
-            { name: 'DB_PASSWORD', configured: true, publicValue: 'synthetic-secret', value: 'synthetic-secret' },
-            { name: 'DEBUG', configured: true, publicValue: false },
-        ], extra: 'synthetic-secret' }), keys)
-        assert.equal(JSON.stringify(summary).includes('synthetic-secret'), false)
-        assert.deepEqual(summary, { fields: [{ name: 'APP_PORT', configured: true, publicValue: 18080 }, { name: 'DB_PASSWORD', configured: true }, { name: 'DEBUG', configured: true, publicValue: false }] })
-        assert.equal(validConfigurationKeys(['APP_PORT', 'DB_PASSWORD']), true)
-        assert.equal(validConfigurationKeys(['key\nprint(secret)']), false)
+    await test('configuration access is bounded to task project files', async () => {
         assert.deepEqual(configurationRoots('/outside/.env', '部署 /srv/app'), [])
         assert.deepEqual(configurationRoots('/srv/app/.env', '部署 /srv/app'), ['/srv/app'])
         assert.deepEqual(configurationRoots('/srv/app/.env.other', '检查 /srv/app/.env'), [])
-        assert.deepEqual(configurationRoots('/srv/项目 文件/.env', '部署 \"/srv/项目 文件\"'), ['/srv/项目 文件'])
-        assert.ok(configurationCommand('/srv/app/.env', keys, ['/srv/app'], 'bash').startsWith('python3 -c '))
+        assert.deepEqual(configurationRoots('/srv/项目 文件/.env', '部署 "/srv/项目 文件"'), ['/srv/项目 文件'])
+        assert.deepEqual(configurationRoots('/home/test/gitea/compose.yml', '最小部署 Gitea', ['/home/test']), ['/home/test'])
+        assert.deepEqual(configurationRoots('/home/test/.ssh/config.json', '部署', ['/home/test']), [])
     })
 }

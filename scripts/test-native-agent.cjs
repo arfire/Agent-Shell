@@ -35,7 +35,7 @@ function load (file) {
         // Simulate a Windows checkout even when the tests run on Unix.
         if (id.startsWith('!!raw-loader!')) return { default: fs.readFileSync(path.resolve(path.dirname(filename), id.slice(13)), 'utf8').replace(/\r?\n/g, '\r\n') }
         if (id.startsWith('.')) return load(path.resolve(path.dirname(filename), id + '.ts'))
-        return require(id)
+        return require(require.resolve(id, { paths: [path.dirname(filename), __dirname] }))
     }
     vm.runInThisContext('(function(require,module,exports){' + source + '\n})', { filename })(localRequire, module, module.exports)
     return module.exports
@@ -176,6 +176,7 @@ async function main () {
     await load('tabby-ai/src/policy/execution-boundary.spec.ts').runTests(test, defaults)
     await load('tabby-ai/src/policy/command-results.spec.ts').runTests(test, defaults)
     await load('tabby-ai/src/policy/optimization.spec.ts').runTests(test, defaults)
+    await load('tabby-ai/src/agent/configuration-inspection.spec.ts').runTests(test, defaults)
     await load('tabby-core/src/api/profileProvider.spec.ts').runTests(test)
     await load('tabby-core/src/api/platform.spec.ts').runTests(test)
     await load('tabby-ai/src/terminal/ai-input.middleware.spec.ts').runTests(test, fixture)

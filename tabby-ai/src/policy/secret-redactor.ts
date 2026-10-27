@@ -166,6 +166,17 @@ export class SecretRedactionScope {
         return placeholder
     }
 
+    configurationValue (value: string, file: string, parts: (string|number)[]): string {
+        const target = file + '#/' + parts.map(part => String(part).replace(/~/g, '~0').replace(/\//g, '~1')).join('/')
+        for (const match of value.matchAll(/__TABBY_SENSITIVE_\d+__/g)) {
+            const binding = this.bindings.get(match[0])
+            if (!binding || binding.program !== 'configuration' || binding.target !== target) {
+                throw new Error('密码只能填入密码框显示的配置文件和字段，请使用对应字段的占位符。')
+            }
+        }
+        return this.restore(value)
+    }
+
     useReason (command: string): string|undefined {
         const tokens = [...command.matchAll(/__TABBY_SENSITIVE_\d+__/g)].map(match => match[0])
         for (const token of tokens) {

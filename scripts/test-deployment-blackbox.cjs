@@ -57,7 +57,43 @@ async function main () {
     }
     await ui.screenshot('sudo-deployment-success')
     ui.report('PASS: real password form, same-call sudo, heredoc and Python configuration writes, no retries and no password disclosure')
-    console.log('PASS Electron sudo deployment flow:', info.directory)
+    await ui.click('.xterm-screen'); await ui.type('BB_CONFIG 部署 /tmp/ash-config-project 并更新配置'); await ui.key('Enter', 'Enter')
+    await ui.wait(`!!${dock}.querySelector('input[type=password]')`, 'configuration password form')
+    await ui.click('.interaction input[type=password]'); await ui.type(password)
+    await ui.click('.interaction .actions button', '继续')
+    let configurationEvents
+    for (let attempt = 0; attempt < 300; attempt++) {
+        configurationEvents = (await (await fetch(`http://127.0.0.1:${info.controlPort}/state`)).json()).events.filter(event => event.scenario === 'BB_CONFIG')
+        if (configurationEvents.length >= 6) break
+        await delay(100)
+    }
+    assert.equal(configurationEvents.length, 6, JSON.stringify(configurationEvents.map(event => event.tool)))
+    assert.ok(configurationEvents[1].tool.fields && configurationEvents[2].tool.written && configurationEvents[4].tool.written)
+    assert.ok(configurationEvents[1].tool.fields.some(field => field.path.at(-1) === 'GITEA__server__ROOT_URL' && field.value === 'http://192.168.1.190:3000/'))
+    assert.equal(configurationEvents[5].tool.exitCode, 0, JSON.stringify(configurationEvents[5].tool))
+    const recorded = JSON.stringify(configurationEvents)
+    for (const secret of [password, 'CONFIG_OLD_SECRET_CANARY', 'CONFIG_UNKNOWN_CANARY', 'CONFIG_COMMENT_CANARY']) {
+        assert.ok(!recorded.includes(secret), 'private value reached model')
+    }
+    await ui.wait(`!!${dock} && !${dock}.querySelector('.stop-button')`, 'configuration completed')
+    const config = spawnSync(process.env.ASH_TEST_DOCKER || 'C:/Program Files/Docker/Docker/resources/bin/docker.exe',
+        ['exec', info.name, 'cat', '/tmp/ash-config-project/compose.yml'], { cwd: root, windowsHide: true, encoding: 'utf8' })
+    assert.equal(config.status, 0)
+    const document = require('../tabby-ai/node_modules/yaml').parse(config.stdout)
+    assert.equal(document.services.gitea.environment.DB_PASSWORD, 'CONFIG_OLD_SECRET_CANARY')
+    assert.equal(document.services.gitea.environment.UNKNOWN, 'CONFIG_UNKNOWN_CANARY')
+    assert.equal(document.services.gitea.environment.NEW_PASSWORD, password.replace(/\$/g, () => '$$'))
+    assert.deepEqual(document.services.gitea.ports, ['3001:3000'])
+    assert.equal(document.services.gitea.environment.GITEA__server__ROOT_URL, 'http://192.168.1.190:3001/')
+    assert.ok(config.stdout.includes('# CONFIG_COMMENT_CANARY'))
+    const configPath = path.join(info.directory, 'verified-compose.yml')
+    fs.writeFileSync(configPath, config.stdout)
+    const validated = spawnSync(process.env.ASH_TEST_DOCKER || 'C:/Program Files/Docker/Docker/resources/bin/docker.exe',
+        ['compose', '-f', configPath, 'config', '--quiet'], { cwd: root, windowsHide: true, encoding: 'utf8' })
+    assert.equal(validated.status, 0, validated.stderr)
+    await ui.screenshot('configuration-deployment-success')
+    ui.report('PASS: structured YAML read/write, preserved secret and comment, field-bound password, normal archives/variables/scripts and Compose validation')
+    console.log('PASS Electron deployment and configuration flow:', info.directory)
 }
 main().catch(async error => {
     await ui?.screenshot('sudo-deployment-failure').catch(() => {})

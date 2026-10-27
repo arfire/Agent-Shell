@@ -18,33 +18,33 @@ export function opaqueConfigurationCommand (command: string): boolean {
     return args[index] === 'up' && args[index + 1] === '-d' && args.length === index + 2
 }
 
-/** Credential privacy applies to the three restricted permission tiers. */
+/** Only explicit credential access is denied; normal shell syntax is classified by risk. */
 export function credentialAccessReason (command: string, mode: ApprovalMode = 'configured'): string|undefined {
     if (mode === 'unrestricted') { return undefined }
-    // Also inspect quoted fragments and escaped paths inside shell/interpreter wrappers.
-    const literal = command.replace(/\\\r?\n/g, '').replace(/["']/g, '')
-    const normalized = literal.replace(/\\/g, '/') + '\n' + literal.replace(/\\(?=[.\w])/g, '').replace(/\\/g, '/')
     if (/__TABBY_SENSITIVE_\d+__/.test(command) && /\b(?:sh|bash|zsh|fish|pwsh|powershell|python\d*|node|perl|ruby)\b[^\r\n]*\s-(?:\w*c\b|Command\b|e\b)/i.test(command)) {
-        return '请将敏感值占位符直接传给目标程序，不要嵌入另一层 Shell 或脚本，以免凭据被重新解释为代码。'
+        return '请将敏感值占位符直接传给目标程序，不要嵌入另一层 Shell 或脚本。'
     }
-    const fileOperations = [...command.matchAll(/\b(?:cat|head|tail|cut|awk|sed|grep|rg|ag|strings|xxd|od|cp|mv|ln|scp|rsync|tar|zip|Get-Content|Get-Item|Select-String)\b([^;\r\n|]*)/gi)]
-    if (fileOperations.some(match => /[?*\[\]]|\$[a-zA-Z_]|\$\(/.test(match[1]))) {
-        return '文件读取、复制和打包不能使用通配符或变量拼接路径。请使用明确的公开文件路径；已有配置应由目标程序直接使用。'
+    let expanded = command.replace(/\\\r?\n/g, '')
+    expanded = expanded.replace(/(?:"([^"]*)"|'([^']*)')\s*\+\s*(?:"([^"]*)"|'([^']*)')/g,
+        (_match, a: string|undefined, b: string|undefined, c: string|undefined, d: string|undefined) => '\'' + (a ?? b) + (c ?? d) + '\'')
+    const encoded = /(?:printf|echo)\s+['"]?([A-Za-z0-9+/=]{8,})['"]?\s*\|\s*base64\s+(?:-d|--decode)\s*\|\s*(?:sh|bash|zsh)\b/.exec(command)
+    if (encoded) { expanded += '\n' + Buffer.from(encoded[1], 'base64').toString('utf8') }
+    // Resolve only literal assignments, without evaluating shell code or rejecting other variables.
+    for (const match of command.matchAll(/(?:^|[;&\n])\s*([A-Za-z_]\w*)=(?:"([^"$\x60]*)"|'([^']*)'|([^\s;$\x60]+))/g)) {
+        const value = match.slice(2).find(Boolean) ?? ''
+        expanded = expanded.replace(new RegExp('\\$(?:\\{' + match[1] + '\\}|' + match[1] + '(?=\\b|["\\\']))', 'g'), value)
     }
-    if (/\b(?:tar|zip)\b/.test(normalized)) {
-        return 'Agent 不能自行打包整个目录，目录内可能包含凭据。请使用已确认不含秘密的发布产物。'
-    }
-    if (/\b(?:vars|globals|locals|__dict__|__getattribute__|getattr)\b/.test(normalized) && /\b(?:python\d*|node|perl|ruby)\b/.test(normalized)) {
-        return '不能通过脚本反射访问环境或隐藏数据。请使用明确的环境状态查询或本地凭据表单。'
-    }
-    if (/\b(?:python\d*|node|perl|ruby)\b[^\r\n]*\s-(?:c|e)\b/.test(normalized) &&
-        /\b(?:open|readFile|readFileSync|read_text|read_bytes|iterdir|listdir|walk|glob)\b/.test(normalized)) {
-        return '脚本不能直接读取文件内容。需要配置时请使用 configuration_status 获取字段状态或公开端口；已有配置可由应用直接使用。'
-    }
+    const literal = expanded.replace(/["']/g, '')
+    const normalized = literal.replace(/\\(?=[.\w])/g, '').replace(/\\/g, '/')
+    const reads = /\b(?:cat|head|tail|cut|less|more|awk|sed|grep|rg|ag|strings|xxd|od|cp|mv|ln|scp|rsync|tar|zip|Get-Content|Select-String|open|readFile|readFileSync|read_text|read_bytes)\b/i.test(normalized)
     if (opaqueConfigurationCommand(command)) { return undefined }
-    const path = /(?:^|[\s/=(:])(?:\.env(?:[.\w-]*)|\.ssh(?:\/[^\s;|&)]*)?|\.aws(?:\/[^\s;|&)]*)?|\.azure(?:\/[^\s;|&)]*)?|\.config\/gcloud(?:\/[^\s;|&)]*)?|\.kube\/config|\.docker\/config\.json|\.(?:npmrc|pypirc|netrc|my\.cnf|pgpass)|(?:id_(?:rsa|dsa|ecdsa|ed25519))|(?:credentials?|secrets?)(?:[.\w-]*))(?=$|[\s/;|&)])|\/etc\/(?:g?shadow)\b|\/proc\/(?:\d+|self|thread-self|\*)\/environ\b|\.(?:pem|p12|pfx|key|kdbx)(?=$|[\s;|&)])/i
-    if (path.test(normalized)) {
-        return 'Agent 不得访问凭据文件。需要密码或密钥时，请调用 request_user_input(kind="secret")，只索取本次操作需要的值。'
+    if (/\btar\s+(?:-?[a-zA-Z]*c[a-zA-Z]*f|-?[a-zA-Z]*f[a-zA-Z]*c)\s+-(?:\s|$)|\bzip\s+(?:-[\w]+\s+)*-(?:\s|$)/.test(command)) {
+        return '请将归档写入服务器上的文件，不要把目录的原始归档内容直接返回模型。正常压缩、解压和列表操作可以使用。'
+    }
+    const privatePath = /(?:^|[\s/=(:])(?:\.env(?:[.\w-]*)|\.ssh(?:\/[^\s;|&)]*)?|\.aws(?:\/[^\s;|&)]*)?|\.azure(?:\/[^\s;|&)]*)?|\.config\/gcloud(?:\/[^\s;|&)]*)?|\.kube\/config|\.docker\/config\.json|\.(?:npmrc|pypirc|netrc|my\.cnf|pgpass)|id_(?:rsa|dsa|ecdsa|ed25519)|(?:credentials?|secrets?)(?:[.\w-]*))(?=$|[\s/;|&)])|\/etc\/(?:g?shadow)\b|\/proc\/(?:\d+|self|thread-self|\*)\/environ\b|\.(?:pem|p12|pfx|key|kdbx)(?=$|[\s;|&)])|\/\.ash-config-[^/\s]+/i
+    if ((reads || /\b(?:docker\s+compose|docker-compose)\b/.test(normalized)) &&
+        (privatePath.test(normalized) || /(?:^|\/)\.e[?*][^\s/]*/.test(normalized))) {
+        return '凭据文件请通过 configuration_file 获取字段状态；私钥、认证存储和密码备份不向模型提供原文。需要新密码时使用本地密码框。'
     }
     const validation = literalArguments(command.trim())
     if (validation?.[0] === 'docker' && validation[1] === 'compose') {
@@ -52,33 +52,32 @@ export function credentialAccessReason (command: string, mode: ApprovalMode = 'c
         if (['-f', '--file'].includes(validation[index])) { index += 2 }
         if (validation[index] === 'config' && ['-q', '--quiet'].includes(validation[index + 1]) && validation.length === index + 2) { return undefined }
     }
-    const environment = /\b(?:printenv|GetEnvironmentVariables?|GetEnvironmentVariable|os\.environ|getenv|process\.env|System\.getenv)\b|(?:^|[\s;|&])(?:env|set|export|declare|typeset)(?:\s+-[a-zA-Z0-9]+)*(?=\s*(?:$|[;|&]))|\b(?:Get-ChildItem|gci|dir|Get-Item|Get-Content)\s+(?:-[\w-]+\s+)*env:|\$env:/i
-    const secretVariable = /(?:\$\{?|%)[\w]*(?:password|passwd|pwd|token|secret|api_?key|private_?key|access_?key)[\w]*(?:\}|%)?|\b(?:get|list|show|retrieve)[-_ ]?(?:password|secret|credential)s?\b/i
-    const exports = /\b(?:docker|podman)\b[^\r\n;|&]*\b(?:inspect|config)\b|\b(?:docker-compose|podman-compose)\b[^\r\n;|&]*\bconfig\b|\bkubectl\b[^\r\n;|&]*\b(?:secrets?|config\s+view)\b|\b(?:aws|az|gcloud|vault|op|bw|security|cmdkey|secret-tool)\b[^\r\n;|&]*\b(?:secrets?\b|secretsmanager|ssm|get-password|credential|lookup|find-generic-password|find-internet-password|read\b)|\b(?:systemctl\s+show|ps\s+[^\r\n]*e[fw]|docker\s+exec[^\r\n]*\benv)\b|\bmysql\.(?:user|global_priv)\b|\bpg_authid\b/i
-    const search = /\b(?:grep|rg|ag|findstr|Select-String|jq|yq|aws|az|gcloud|vault|op|bw)\b[^\r\n;]*\b[\w.-]*(?:password|passwd|token|secret|credential|api_?key|private_?key)[\w.-]*\b|\b(?:169\.254\.169\.254|169\.254\.170\.2|metadata\.google\.internal)\b|\b(?:Get-Credential|Get-StoredCredential|Get-Secret|keyring|keytar)\b|\.(?:git-credentials|bash_history|zsh_history|psql_history|mysql_history)\b/i
-    const configPath = /\b(?:config|settings|appsettings|application|docker-compose|compose)[\w.-]*\.(?:ya?ml|json|ini|conf|toml|properties)\b/i
-    const configReads = [...command.matchAll(/\b(?:cat|head|tail|less|more|Get-Content|type|grep|rg|Select-String|jq|yq|awk|sed|cp|scp|rsync|tar|zip)\b([^;\r\n|]*)/gi)]
-    // Output files and heredoc delimiters are not input files.
-    const bulkConfig = configReads.some(match => {
-        const inputs = match[1].replace(/(?:\d*>>?|\d*<<-?)\s*(?:"[^"]*"|'[^']*'|[^\s;&|]+)/g, '').replace(/["']/g, '')
-        return configPath.test(inputs) || configPath.test(inputs.replace(/\\(?=[.\w])/g, ''))
+    if (/\b(?:open|readFile|readFileSync|read_text|read_bytes)\b/.test(normalized) &&
+        /\b(?:config|settings|appsettings|application|docker-compose|compose)[\w.-]*\.(?:ya?ml|json|ini|conf|toml|properties)\b/i.test(normalized)) {
+        return '配置文件请使用 configuration_file，模型只接收公开字段，隐藏字段由程序保留。'
+    }
+    const configReads = [...command.matchAll(/\b(?:cat|head|tail|less|more|Get-Content|type|grep|rg|Select-String|jq|yq|awk|sed|cp|scp|rsync)\b([^;\r\n|]*)/gi)]
+    if (configReads.some(match => /\b(?:config|settings|appsettings|application|docker-compose|compose)[\w.-]*\.(?:ya?ml|json|ini|conf|toml|properties)\b/i.test(
+        match[1].replace(/(?:\d*>>?|\d*<<-?)\s*(?:"[^"]*"|'[^']*'|[^\s;&|]+)/g, '').replace(/["']/g, '').replace(/\\(?=[.\w])/g, '')))) {
+        return '请通过 configuration_file 读取或修改配置：普通字段可见，已有密码保持不变。'
+    }
+    const envDump = /\b(?:printenv|GetEnvironmentVariables?)\b|(?:^|[\s;|&])(?:env|set|export|declare|typeset)(?:\s+-[a-zA-Z0-9]+)*(?=\s*(?:$|[;|&]))|\b(?:Get-ChildItem|gci|dir|Get-Item|Get-Content)\s+(?:-[\w-]+\s+)*env:|\b(?:os\.environ|process\.env)(?![.\w[])|\bvars\s*\(os\)[^\n]*environ/i
+    const secretVariable = [...command.matchAll(/\$env:([A-Za-z_]\w*)|\$\{?([A-Za-z_]\w*)|%([A-Za-z_]\w*)%/gi)].some(match => {
+        const name = match.slice(1).find(Boolean) ?? ''
+        return !/^(?:PWD|OLDPWD)$/i.test(name) && /password|passwd|pwd|token|secret|api_?key|private_?key|access_?key/i.test(name)
     })
-    if (environment.test(normalized) || secretVariable.test(normalized) || exports.test(normalized) || search.test(normalized) || bulkConfig) {
-        return 'Agent 不得自行提取环境变量、容器配置、凭据存储或数据库认证信息。请使用 request_user_input(kind="secret") 获取必要凭据。'
+    const credentialQuery = /\bkubectl\b[^\r\n;|&]*\b(?:secrets?|config\s+view)\b|\b(?:aws|az|gcloud|vault|op|bw|security|cmdkey|secret-tool)\b[^\r\n;|&]*\b(?:secrets?\b|secretsmanager|ssm|get-password|credential|lookup|find-generic-password|find-internet-password|read\b)|\bmysql\.(?:user|global_priv)\b|\bpg_authid\b|\b(?:169\.254\.169\.254|169\.254\.170\.2|metadata\.google\.internal)\b|\b(?:Get-Credential|Get-StoredCredential|Get-Secret|keyring|keytar)\b|\.(?:git-credentials|bash_history|zsh_history|psql_history|mysql_history)\b/i
+    const inspect = /\b(?:docker|podman)\b[^\r\n;|&]*\binspect\b/.test(normalized)
+    const fullInspect = inspect && (!/(?:--format|-f)(?:=|\s)/.test(command) || /(?:\.Env\b|\.Config\b(?!\.Image\b))/.test(command))
+    const composeDump = /\b(?:docker\s+compose|docker-compose|podman\s+compose|podman-compose)\b[^\r\n;|&]*\bconfig\b/.test(normalized)
+    const cloudSecret = /\b(?:aws|az|gcloud|vault|op|bw)\b[^\r\n;]*\b[\w.-]*(?:password|passwd|token|secret|credential|api_?key|private_?key)[\w.-]*\b/i.test(normalized)
+    if (envDump.test(command) || secretVariable || credentialQuery.test(normalized) || cloudSecret || fullInspect || composeDump) {
+        return '请勿导出完整环境、认证存储或容器配置。可查询具体状态字段，项目配置使用 configuration_file。'
     }
-    const obscuredExecution = /\b(?:eval|Invoke-Expression|iex)\b|\b(?:base64|b64decode|frombase64string|atob|fromCharCode|String\.fromCodePoint|bytes\.fromhex|Buffer\.from)\b|-(?:enc|encodedcommand)\b|\$\{|\$\x27|\b(?:exec|compile)\s*\(/i
-    const obscuredSyntax = obscuredExecution.exec(command)?.[0] ?? /["']\s*\+\s*["']|\b(?:chr|char)\s*\(|\\x[\da-f]{2}|\\u[\da-f]{4}/i.exec(command)?.[0]
-    if (obscuredSyntax) {
-        return `命令包含当前凭据检查无法验证的语法“${obscuredSyntax}”，本次命令未执行。检查范围包含整段命令和写入的脚本内容，并非一律禁止 heredoc。请在原任务范围内改用可直接检查的明文命令；不要建议用户手动绕过检查。需要凭据时使用密码输入框。`
-    }
-    // Never accept guessed/literal passwords in model-generated login commands.
-    const literals = [...command.matchAll(/(?:^|\s)(?:-p([^\s]+)|--password(?:=|\s+)([^\s]+))|\b[\w]*(?:PASSWORD|PASSWD|MYSQL_PWD|PGPASSWORD)\s*=\s*("[^"]*"|'[^']*'|[^\s;]+)/gi)]
-    if (literals.some(match => {
-        if (match[1] && match[0].trimStart().startsWith('-P')) { return false }
-        if (match[1] && !/\b(?:mysql|mariadb|mysqldump)\b/i.test(command)) { return false }
+    const passwords = [...command.matchAll(/(?:^|\s)(?:-p([^\s]+)|--password(?:=|\s+)([^\s]+))|\b[\w]*(?:PASSWORD|PASSWD|MYSQL_PWD|PGPASSWORD)\s*=\s*("[^"]*"|'[^']*'|[^\s;]+)/gi)]
+    if (passwords.some(match => {
+        if (match[1] && (match[0].trimStart().startsWith('-P') || !/\b(?:mysql|mariadb|mysqldump)\b/i.test(command))) { return false }
         return !/^["']?__TABBY_SENSITIVE_\d+__["']?$/.test(match[1] || match[2] || match[3])
-    })) {
-        return '请勿猜测或直接填入密码。请调用 request_user_input(kind="secret") 并在命令中使用返回的占位符。'
-    }
+    })) { return '请勿直接填入密码；使用本地密码框获取占位符，配置字段交由 configuration_file 填入。' }
     return undefined
 }

@@ -109,6 +109,7 @@
     "docs": "node scripts/build-docs.mjs",
     "lint": "eslint --ext ts */src */lib",
     "test:native-agent": "node scripts/test-native-agent.cjs",
+    "test:agent:deployment": "node scripts/test-deployment-blackbox.cjs",
     "test:portable-credentials": "node scripts/test-portable-credentials.cjs",
     "test:credentials:no-master": "node scripts/test-no-master-blackbox.cjs",
     "test:credentials:settings": "node scripts/test-credential-settings-blackbox.cjs",

@@ -21,9 +21,9 @@ function load (file) {
         // transpileModule cannot inline the const enum as the production compiler does.
         if (id === 'russh') return { ...russh, SFTPFileType: require('../app/node_modules/russh/lib/native').SftpFileType }
         if (id === 'tabby-core') return load('tabby-core/src/api/platform.ts')
-        if (id === '@angular/core') return {}
+        if (id === '@angular/core') return { Injectable: () => value => value }
         if (id.startsWith('.')) return load(path.resolve(path.dirname(filename), id + '.ts'))
-        return require(id)
+        return require(require.resolve(id, { paths: [path.dirname(filename), __dirname] }))
     }
     vm.runInThisContext('(function(require,module,exports){' + source + '\n})', { filename })(localRequire, module, module.exports)
     return module.exports
@@ -60,6 +60,15 @@ async function main () {
         await test()
         console.log('PASS', label)
     }, load, sftp, native)
+    await load('tabby-ai/src/agent/configuration-inspection.spec.ts').runRemoteTests(async (label, test) => {
+        await test()
+        console.log('PASS', label)
+    }, sftp, async (file, mode) => {
+        const { executeSSH } = load('tabby-ai/src/terminal/ssh-exec.ts')
+        const command = load('tabby-ai/src/agent/configuration-inspection.ts').configurationModeCommand(file, mode, 'bash')
+        const result = await executeSSH(async () => client.activateChannel(await client.openSessionChannel()), command, 'bash', () => {})
+        assert.equal(result.exitCode, 0, 'private configuration permissions')
+    })
     if (process.env.ASH_TEST_SFTP_UI === '1') {
         const result = spawnSync(process.execPath, [path.join(__dirname, 'test-native-agent-ui.cjs')], {
             cwd: root, windowsHide: true, stdio: 'inherit', timeout: 120000,

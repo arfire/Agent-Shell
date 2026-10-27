@@ -15,7 +15,8 @@
   "dependencies": {
     "js-yaml": "4.1.0",
     "parse5": "6.0.1",
-    "marked": "4.1.1"
+    "marked": "4.1.1",
+    "yaml": "2.9.1"
   },
   "peerDependencies": {
     "@angular/common": "^15",

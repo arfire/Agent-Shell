@@ -15,6 +15,8 @@ export interface SFTPFile {
     mode: number
     size: number
     modified: Date
+    uid?: number
+    gid?: number
 }
 
 export class SFTPFileHandle {
@@ -81,6 +83,8 @@ export class SFTPSession {
             mode: stats.permissions ?? 0,
             size: stats.size,
             modified: new Date((stats.mtime ?? 0) * 1000),
+            uid: stats.uid,
+            gid: stats.gid,
         }
     }
 
@@ -233,6 +237,8 @@ export class SFTPSession {
             mode: entry.metadata.permissions ?? 0,
             size: entry.metadata.size,
             modified: new Date((entry.metadata.mtime ?? 0) * 1000),
+            uid: entry.metadata.uid,
+            gid: entry.metadata.gid,
         }
     }
 }

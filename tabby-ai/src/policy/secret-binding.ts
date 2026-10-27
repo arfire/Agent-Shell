@@ -61,10 +61,14 @@ export function validateSecretBinding (program: unknown, target: unknown): Secre
         return { program: name, target: target.toLowerCase() }
     }
     if (name === 'sudo' && target === 'current-server') { return { program: name, target } }
+    if (name === 'configuration' && /^\/[^#\r\n]+#\/[^\r\n]+$/.test(target) && !target.split('#')[0].split('/').includes('..')) {
+        return { program: name, target }
+    }
     return undefined
 }
 
 export function boundSecretReason (command: string, binding: SecretBinding): string|undefined {
+    if (binding.program === 'configuration') { return '此密码只允许由 configuration_file 写入已绑定的配置字段，不能交给终端命令。' }
     let source = command.trim()
     if (binding.program === 'sudo') {
         // The only allowed secret pipeline delivers a password directly to sudo stdin.

@@ -1,4 +1,3 @@
-import { literalArguments } from './secret-binding'
 import { executionBoundary } from './execution-boundary'
 
 export interface TaskRestrictions {
@@ -34,27 +33,11 @@ export function taskCommandReason (goal: string, command: string, afterFailure =
         return '本次任务明确禁止修改应用代码，命令未执行。'
     }
     if (limits.changes) { return undefined }
-    const literal = !/[\r\n;|&<>`$\\(){}\x00-\x1f]/.test(command)
-    const version = /^(?:python[\d.]*|node|npm|yarn|git|docker|podman|curl|wget|java|javac|go|ruby|perl|php|pip[\d.]*)(?:\s+compose)?\s+(?:--version|-V|version)$/i.test(command.trim())
-    const args = literalArguments(command)
-    const plainFiles = (values: string[]): boolean => values.length > 0 && values.every(value => /^(?:\/[\w.-]+)+\.(?:md|txt|log|sh|py|js|ts)$/.test(value))
-    const fileRead = args && (args[0] === 'cat' && plainFiles(args.slice(1)) ||
-        ['head', 'tail'].includes(args[0]) && (plainFiles(args.slice(1)) || /^-n$/.test(args[1]) && /^[0-9]{1,5}$/.test(args[2]) && plainFiles(args.slice(3))) ||
-        args[0] === 'sed' && args[1] === '-n' && /^[0-9]+(?:,[0-9]+)?p$/.test(args[2]) && plainFiles(args.slice(3)))
-    if (fileRead) { return undefined }
-    if (args?.[0] === 'curl') {
-        const flags = new Set(['--disable', '-q', '--silent', '-s', '--show-error', '-S', '-sS', '--fail', '-f', '--head', '-I'])
-        const values = new Set(['--noproxy', '--connect-timeout', '--max-time', '-m', '--header', '-H'])
-        let urls = 0
-        let valid = true
-        for (let index = 1; index < args.length; index++) {
-            if (/^https?:\/\//.test(args[index])) { urls++; continue }
-            if (flags.has(args[index])) { continue }
-            if (values.has(args[index]) && args[index + 1] && !/^[@-]/.test(args[index + 1])) { index++; continue }
-            valid = false
-        }
-        if (valid && urls === 1) { return undefined }
-    }
-    if (executionBoundary(command).risk === 'SAFE' || literal && version) { return undefined }
-    return '本次任务禁止修改环境。此命令无法由只读诊断规则确认安全，未执行；请改用明确的状态查询。'
+    const changes = executionBoundary(command).risk === 'DANGEROUS' ||
+        /(?:^|[;|&\n])\s*(?:sudo\s+(?:-\w+\s+)*)?(?:touch|mkdir|tee|cp|mv|ln|install|kill|pkill|killall)\b/i.test(command) ||
+        /(?:^|[^<])>(?!&)|\b(?:write_text|write_bytes|writeFile|writeFileSync|unlink|rmtree)\s*\(/.test(command) ||
+        /\b(?:systemctl|service)\s+(?:\S+\s+)?(?:start|stop|restart|reload|enable|disable)\b|\b(?:docker|podman)(?:\s+compose)?\s+(?:up|start|stop|restart|create|build|pull|run|exec)\b/i.test(command) ||
+        /\bcurl\b[^\n]*(?:--data|--json|--upload-file|-d\s|-T\s|(?:-X|--request)\s+(?:POST|PUT|PATCH|DELETE))/.test(command) ||
+        /(?:^|[;&|\n])\s*(?:sh|bash|zsh|fish)\s+\S+\.sh\b/.test(command)
+    return changes ? '本次任务明确只读，此命令会修改文件、服务或远端状态，未执行。' : undefined
 }
