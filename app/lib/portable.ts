@@ -32,3 +32,11 @@ if (usePortableData) {
     electron.app.setPath('logs', logsDirectory)
     electron.app.setPath('crashDumps', crashDumpsDirectory)
 }
+
+// Display the Ash name without changing the profile directories used by
+// existing installations or source runs.
+const userData = electron.app.getPath('userData')
+const sessionData = electron.app.getPath('sessionData')
+electron.app.setName('Ash')
+electron.app.setPath('userData', userData)
+electron.app.setPath('sessionData', sessionData)

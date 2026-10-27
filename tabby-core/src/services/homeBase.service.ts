@@ -33,17 +33,13 @@ export class HomeBaseService {
         this.platform.openExternal('https://discord.gg/Vn7BjmzhtF')
     }
 
-    openTranslations (): void {
-        this.platform.openExternal('https://translate.tabby.sh/project/tabby')
-    }
-
     reportBug (): void {
         let body = `Version: ${this.appVersion}\n`
         body += `Platform: ${this.hostApp.platform} ${process.arch} ${this.platform.getOSRelease()}\n`
         const plugins = this.bootstrapData.installedPlugins.filter(x => !x.isBuiltin).map(x => x.name)
         body += `Plugins: ${plugins.join(', ') || 'none'}\n`
         body += `Frontend: ${this.config.store.terminal?.frontend}\n\n`
-        this.platform.openExternal(`https://github.com/Eugeny/tabby/issues/new?body=${encodeURIComponent(body)}`)
+        this.platform.openExternal(`https://github.com/arfire/Agent-Shell/issues/new?body=${encodeURIComponent(body)}`)
     }
 
     enableAnalytics (): void {

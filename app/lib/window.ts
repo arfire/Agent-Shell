@@ -86,7 +86,8 @@ export class Window {
         const bwOptions: BrowserWindowConstructorOptions = {
             width: defaultWidth,
             height: defaultHeight,
-            title: 'Tabby',
+            title: 'Ash',
+            icon: path.join(app.getAppPath(), 'assets', 'logo.png'),
             minWidth: 400,
             minHeight: 300,
             webPreferences: {

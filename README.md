@@ -1,4 +1,6 @@
-# Ash · Agent Shell
+# Ash
+
+<img src="app/assets/logo.png" width="96" alt="Ash Logo">
 
 基于 [Tabby](https://github.com/Eugeny/tabby) 的 SSH Agent 终端。
 

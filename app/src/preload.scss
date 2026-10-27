@@ -27,7 +27,7 @@ app-root {
 
       .bar {
         transition: 1s ease-out width;
-        background: #a1c5e4;
+        background: #ff912d;
         height: 3px;
         box-shadow: 0 0 2px #ffffff1f;
       }
@@ -43,25 +43,21 @@ app-root {
 
 
 
-.tabby-logo {
+.ash-logo {
   width: 120px;
   height: 120px;
-  background: url('../assets/logo.svg');
-  background-repeat: none;
+  background: url('../assets/logo.png');
+  background-repeat: no-repeat;
   background-size: contain;
   margin: auto;
 }
 
 
-.tabby-title {
-  color: #a1c5e4;
+.ash-title {
+  color: var(--theme-fg-more, #f4e9df);
   font-family: 'Source Sans Pro';
   text-align: center;
-  font-weight: normal;
+  font-weight: 600;
   font-size: 32px;
   margin: 0;
-
-  sup {
-      color: #842fe0;
-  }
 }

@@ -8,7 +8,7 @@ Ash 是基于 [Tabby](https://github.com/Eugeny/tabby) 开发的终端工具。�
 
 ### 启动程序
 
-使用 Windows 便携版时，先解压压缩包，再运行其中的程序。不要直接在压缩包中运行。
+使用 Windows 便携版时，先解压压缩包，再运行其中的 `Ash.exe`。不要直接在压缩包中运行。项目来源和 MIT 许可说明位于“设置 → 关于”。
 
 如果从源码启动，请按 [README 的启动步骤](../README.md#启动) 操作。
 

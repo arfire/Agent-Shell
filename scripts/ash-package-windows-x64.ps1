@@ -68,7 +68,7 @@ try {
     & node 'scripts\build-windows.mjs'
     Assert-NativeSuccess 'Windows x64 packaging'
 
-    $artifact = Get-ChildItem -LiteralPath (Join-Path $repoRoot 'dist') -Filter 'tabby-*-portable-x64.zip' -File |
+    $artifact = Get-ChildItem -LiteralPath (Join-Path $repoRoot 'dist') -Filter 'Ash-*-portable-x64.zip' -File |
         Sort-Object LastWriteTime -Descending |
         Select-Object -First 1
     if (-not $artifact) {

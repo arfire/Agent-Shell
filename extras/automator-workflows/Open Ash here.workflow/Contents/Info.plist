@@ -12,7 +12,7 @@
 			<key>NSMenuItem</key>
 			<dict>
 				<key>default</key>
-				<string>Paste path into Tabby</string>
+				<string>Open Ash here</string>
 			</dict>
 			<key>NSMessage</key>
 			<string>runWorkflowAsService</string>

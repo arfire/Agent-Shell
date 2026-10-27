@@ -1,14 +1,14 @@
 {
   "name": "tabby",
-  "description": "A terminal for a modern age",
+  "description": "Ash — terminal, SSH and AI agent",
   "private": true,
-  "repository": "https://github.com/Eugeny/tabby",
+  "repository": "https://github.com/arfire/Agent-Shell",
   "author": {
     "name": "Tabby Developers",
     "email": "e@ajenti.org"
   },
   "main": "dist/main.js",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "scripts": {
     "postinstall": "patch-package",
     "build": "webpack --progress --color --display-modules",

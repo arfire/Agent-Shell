@@ -6,66 +6,10 @@
                 span(translate) Application
             ng-template(ngbNavContent)
                 .content-box
-                    .row
-                        .col-12.col-md-6
-                            .logo-area
-                                .tabby-logo.mt-3
-
-                                h1.tabby-title Tabby
-                                    sup α
-                                .text-muted {{homeBase.appVersion}}
-
-                                button.btn.btn-secondary.mt-3.mb-2(
-                                    *ngIf='!updateAvailable && hostApp.platform !== Platform.Web',
-                                    (click)='checkForUpdates()',
-                                    [disabled]='checkingForUpdate'
-                                )
-                                    i.fas.fa-sync(
-                                        [class.fa-spin]='checkingForUpdate'
-                                    )
-                                    span(translate) Check for updates
-
-                                button.btn.btn-info.mt-3.mb-2(
-                                    *ngIf='updateAvailable',
-                                    (click)='updater.update()',
-                                )
-                                    i.fas.fa-sync
-                                    span(translate) Update
-
-                        .col-12.col-md-6
-                            .list-group.list-group-light.mb-5
-                                button.list-group-item.list-group-item-action.link-card((click)='homeBase.reportBug()')
-                                    i.fas.fa-fw.fa-bug
-                                    div
-                                        div(translate) Report a problem
-                                        small.text-muted(translate) Generate a pre-filled GitHub issue
-
-                                button.list-group-item.list-group-item-action.link-card((click)='homeBase.openDiscord()')
-                                    i.fab.fa-fw.fa-discord
-                                    div
-                                        div(translate) Community
-                                        small.text-muted(translate) On Discord
-
-                                button.list-group-item.list-group-item-action.link-card((click)='homeBase.openGitHub()')
-                                    i.fab.fa-fw.fa-github
-                                    div
-                                        div GitHub
-                                        small.text-muted(translate) Source code
-
-                                button.list-group-item.list-group-item-action.link-card((click)='showReleaseNotes()')
-                                    i.fas.fa-fw.fa-book
-                                    div
-                                        div(translate) What's new
-                                        small.text-muted(translate) Show release notes
-
-
                     h3(translate) Application settings
                     .form-line
                         .header
                             .title(translate) Language
-                            a.description((click)='homeBase.openTranslations()')
-                                span(translate) Help translate Tabby
-                                i.fas.fa-external-link-square-alt.ms-1
                         select.form-control([(ngModel)]='config.store.language', (ngModelChange)='saveConfiguration(true)')
                             option([ngValue]='null', translate) Automatic
                             option(
@@ -82,7 +26,7 @@
                     .form-line(*ngIf='hostApp.platform !== Platform.Web')
                         .header
                             .title(translate) Enable analytics
-                            .description(translate) We're only tracking your Tabby and OS versions.
+                            .description(translate) We're only tracking your Ash and OS versions.
                         toggle(
                             [(ngModel)]='config.store.enableAnalytics',
                             (ngModelChange)='saveConfiguration(true)',
@@ -137,6 +81,68 @@
                     span {{provider.title|translate}}
                 ng-template(ngbNavContent)
                     settings-tab-body([provider]='provider')
+
+        li(ngbNavItem='about')
+            a.d-flex.align-items-center(ngbNavLink, draggable='false')
+                i.fas.fa-fw.fa-info-circle.me-2
+                span(translate) About
+            ng-template(ngbNavContent)
+                .content-box
+                    h3.mb-4(translate) About
+                    .row
+                        .col-12.col-md-6
+                            .logo-area
+                                .ash-logo.mt-3
+
+                                h1.ash-title Ash
+
+                                .text-muted {{homeBase.appVersion}}
+                                .text-muted.small.mt-2 基于 Tabby 开发 · MIT License
+
+                                button.btn.btn-secondary.mt-3.mb-2(
+                                    *ngIf='!updateAvailable && hostApp.platform !== Platform.Web',
+                                    (click)='checkForUpdates()',
+                                    [disabled]='checkingForUpdate'
+                                )
+                                    i.fas.fa-sync(
+                                        [class.fa-spin]='checkingForUpdate'
+                                    )
+                                    span(translate) Check for updates
+
+                                button.btn.btn-info.mt-3.mb-2(
+                                    *ngIf='updateAvailable',
+                                    (click)='updater.update()',
+                                )
+                                    i.fas.fa-sync
+                                    span(translate) Update
+
+                        .col-12.col-md-6
+                            .list-group.list-group-light.mb-5
+                                button.list-group-item.list-group-item-action.link-card((click)='homeBase.reportBug()')
+                                    i.fas.fa-fw.fa-bug
+                                    div
+                                        div(translate) Report a problem
+                                        small.text-muted(translate) Generate a pre-filled GitHub issue
+
+                                button.list-group-item.list-group-item-action.link-card((click)='homeBase.openDiscord()')
+                                    i.fab.fa-fw.fa-discord
+                                    div
+                                        div(translate) Community
+                                        small.text-muted(translate) On Discord
+
+                                button.list-group-item.list-group-item-action.link-card((click)='homeBase.openGitHub()')
+                                    i.fab.fa-fw.fa-github
+                                    div
+                                        div GitHub
+                                        small.text-muted(translate) Source code
+
+                                button.list-group-item.list-group-item-action.link-card((click)='showReleaseNotes()')
+                                    i.fas.fa-fw.fa-book
+                                    div
+                                        div(translate) What's new
+                                        small.text-muted(translate) Show release notes
+
+
 
         li(ngbNavItem='config-file')
             a.d-flex.align-items-center(ngbNavLink, draggable='false')

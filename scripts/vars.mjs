@@ -12,7 +12,7 @@ const productVersion = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../ve
 export const tabbyVersion = productVersion.tabby
 export const ashVersion = productVersion.ash
 export const version = ashVersion
-export const displayVersion = `Tabby ${tabbyVersion} / Ash ${ashVersion}`
+export const displayVersion = `Ash ${ashVersion} (Tabby ${tabbyVersion})`
 process.env.TABBY_VERSION = tabbyVersion
 process.env.ASH_VERSION = ashVersion
 

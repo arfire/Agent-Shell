@@ -142,7 +142,7 @@ export class ConfigSyncSettingsTabComponent extends BaseComponent {
         }
     }
 
-    openTabbyWebInfo () {
+    openSyncServiceInfo () {
         this.platform.openExternal('https://github.com/Eugeny/tabby-web')
     }
 
