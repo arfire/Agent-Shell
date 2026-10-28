@@ -1,0 +1,1006 @@
+import deepEqual from 'deep-equal'
+import { BehaviorSubject, filter, firstValueFrom, fromEvent, takeUntil } from 'rxjs'
+import { Injector } from '@angular/core'
+import { ConfigService, getCSSFontFamily, getWindows10Build, HostAppService, HotkeysService, Platform, PlatformService, TerminalColorScheme, ThemesService } from 'tabby-core'
+import { Frontend, SearchOptions, SearchState } from './frontend'
+import { Terminal, IDecoration, IMarker, ITheme } from '@xterm/xterm'
+import { FitAddon } from '@xterm/addon-fit'
+import { LigaturesAddon } from '@xterm/addon-ligatures'
+import { ISearchOptions, SearchAddon } from '@xterm/addon-search'
+import { WebglAddon } from '@xterm/addon-webgl'
+import { Unicode11Addon } from '@xterm/addon-unicode11'
+import { SerializeAddon } from '@xterm/addon-serialize'
+import { ImageAddon } from '@xterm/addon-image'
+import { CanvasAddon } from '@xterm/addon-canvas'
+import { BaseTerminalProfile } from '../api/interfaces'
+import { getXtermBackgroundColor } from '../helpers'
+import { generatePalette } from '../generatePalette'
+import './xterm.css'
+
+const COLOR_NAMES = [
+    'black', 'red', 'green', 'yellow', 'blue', 'magenta', 'cyan', 'white',
+    'brightBlack', 'brightRed', 'brightGreen', 'brightYellow', 'brightBlue', 'brightMagenta', 'brightCyan', 'brightWhite',
+]
+
+// How many times to recreate the WebGL renderer after a lost GPU context
+// before giving up and letting xterm fall back to its DOM renderer.
+const MAX_WEBGL_RECOVERY_ATTEMPTS = 3
+
+export interface InlineBlockDecoration {
+    dispose: () => void
+    lock: () => Promise<void>
+    resizeToContent: (height: number, userInitiated?: boolean) => void
+}
+
+class XTermInlineBlockDecoration implements InlineBlockDecoration {
+    private desiredRows: number
+    private desiredHeight = 0
+    private disposed = false
+    private locked = false
+    private operation = Promise.resolve()
+    private terminalResizeListener: { dispose: () => void }
+
+    constructor (
+        private xterm: Terminal,
+        private xtermCore: any,
+        private marker: IMarker,
+        private decoration: IDecoration,
+        private host: HTMLElement,
+        private reservedRows: number,
+        private minimumRows: number,
+        private maximumRows: number,
+    ) {
+        this.desiredRows = reservedRows
+        this.bindDecoration(decoration)
+        this.terminalResizeListener = this.xterm.onResize(() => {
+            if (!this.locked) {
+                this.queueLayoutUpdate()
+            }
+        })
+    }
+
+    resizeToContent (height: number, userInitiated = false): void {
+        if (this.disposed || this.locked && !userInitiated) {
+            return
+        }
+        this.desiredHeight = Math.max(0, height)
+        this.queueLayoutUpdate(userInitiated)
+    }
+
+    async lock (): Promise<void> {
+        this.locked = true
+        await this.operation
+    }
+
+    dispose (): void {
+        this.disposed = true
+        this.terminalResizeListener.dispose()
+        this.decoration.dispose()
+        this.marker.dispose()
+    }
+
+    private queueLayoutUpdate (userInitiated = false): void {
+        const cellHeight = this.getCellHeight()
+        const maximumRows = this.getMaximumRows()
+        const minimumRows = Math.min(this.minimumRows, maximumRows)
+        this.desiredRows = Math.max(minimumRows, Math.min(maximumRows, Math.ceil(this.desiredHeight / cellHeight)))
+        this.operation = this.operation.then(() => this.applyDesiredRows(userInitiated))
+    }
+
+    private applyDesiredRows (userInitiated = false): Promise<void> {
+        if (this.disposed || this.desiredRows === this.reservedRows) {
+            return Promise.resolve()
+        }
+        const nextRows = this.desiredRows
+        const sequence = this.locked && userInitiated
+            ? this.buildAnchoredResizeSequence(nextRows)
+            : this.buildResizeSequence(nextRows)
+        if (sequence === null) {
+            return Promise.resolve()
+        }
+        return new Promise(resolve => {
+            const buffer = this.xterm.buffer.active
+            const wasAtBottom = buffer.viewportY >= buffer.baseY - 1
+            const savedViewportY = buffer.viewportY
+            this.xterm.write(sequence, () => {
+                this.reservedRows = nextRows
+                this.replaceDecoration(nextRows)
+                if (wasAtBottom) {
+                    this.xtermCore._scrollToBottom()
+                } else {
+                    this.xterm.scrollToLine(Math.min(savedViewportY, this.xterm.buffer.active.baseY))
+                }
+                resolve()
+            })
+        })
+    }
+
+    private replaceDecoration (height: number): void {
+        if (this.disposed) {
+            return
+        }
+        const nextDecoration = this.xterm.registerDecoration({
+            marker: this.marker,
+            x: 0,
+            width: this.xterm.cols,
+            height,
+            layer: 'top',
+        })
+        if (!nextDecoration) {
+            return
+        }
+        const previousDecoration = this.decoration
+        this.decoration = nextDecoration
+        this.bindDecoration(nextDecoration)
+        previousDecoration.dispose()
+    }
+
+    private bindDecoration (decoration: IDecoration): void {
+        decoration.onRender(element => {
+            const cellHeight = this.getCellHeight()
+            const viewportRow = this.marker.line - this.xterm.buffer.active.viewportY
+            const overlapsViewport = viewportRow < this.xterm.rows && viewportRow + this.reservedRows > 0
+            element.classList.add('tabby-ai-decoration')
+            element.style.zIndex = '5'
+            element.style.width = '100%'
+            element.style.height = `${this.reservedRows * cellHeight}px`
+            element.style.overflow = 'hidden'
+            // xterm 5.4 hides a decoration as soon as its marker row leaves
+            // the viewport, even when a multi-row decoration still overlaps
+            // the screen. Restore it at the correct negative offset until its
+            // bottom edge has actually scrolled out.
+            if (overlapsViewport) {
+                element.style.top = `${viewportRow * cellHeight}px`
+                element.style.display = 'block'
+            } else {
+                element.style.display = 'none'
+            }
+            // The Angular host intentionally leaves a small inset around the
+            // card. Decorations sit above xterm's canvas, so that inset must
+            // be opaque as well; otherwise the first cell of a covered shell
+            // prompt (usually the "r" in root@host) remains visible.
+            element.style.backgroundColor = this.xterm.options.theme?.background ?? '#000'
+            // onRender fires for ordinary terminal repaint and scrolling too.
+            // Reparenting an already mounted Angular view here interrupts wheel
+            // gestures, selection and focused form controls.
+            if (element.childNodes.length !== 1 || element.firstChild !== this.host) {
+                element.replaceChildren(this.host)
+            }
+        })
+    }
+
+    /**
+     * Active blocks always end immediately before the local display cursor.
+     * Growing with line feeds works even when that cursor is on the last row:
+     * xterm scrolls the viewport and exposes the newly reserved lines. CSI IL
+     * cannot do that on the bottom row and previously left the block clipped
+     * below the viewport. Shrinking moves the local cursor back over the blank
+     * reservation; lock() prevents this after real session output resumes.
+     */
+    private buildResizeSequence (nextRows: number): string {
+        const delta = nextRows - this.reservedRows
+        if (delta > 0) {
+            return '\r\n'.repeat(delta)
+        }
+        return `\x1b[${-delta}A`
+    }
+
+    /**
+     * A completed block may still be collapsed by the user. Insert/delete its
+     * local reservation at the marker so shell output below it moves together
+     * with the decoration instead of leaving a stale blank area or a duplicate
+     * looking prompt at the bottom.
+     */
+    private buildAnchoredResizeSequence (nextRows: number): string|null {
+        const buffer = this.xterm.buffer.active
+        const cursorLine = buffer.baseY + buffer.cursorY
+        const delta = nextRows - this.reservedRows
+        const targetLine = this.marker.line + (delta > 0 ? this.reservedRows : nextRows)
+        if (targetLine < buffer.baseY || targetLine > cursorLine) {
+            return null
+        }
+        if (delta > 0 && delta > this.xterm.rows - 1 - buffer.cursorY) {
+            return null
+        }
+        const moveToTarget = cursorLine === targetLine ? '' : `\x1b[${cursorLine - targetLine}A`
+        if (delta > 0) {
+            return `\x1b7${moveToTarget}\x1b[${delta}L\x1b8\x1b[${delta}B`
+        }
+        return `\x1b7${moveToTarget}\x1b[${-delta}M\x1b8\x1b[${-delta}A`
+    }
+
+    private getCellHeight (): number {
+        return Math.max(1, this.xtermCore._renderService?.dimensions?.css?.cell?.height ?? 1)
+    }
+
+    private getMaximumRows (): number {
+        // Keep at least 40% of a small terminal available for normal shell
+        // output. The configured cap still limits blocks on large terminals.
+        const viewportLimit = this.xterm.rows - Math.max(4, Math.ceil(this.xterm.rows * 0.4))
+        return Math.max(1, Math.min(this.maximumRows, viewportLimit))
+    }
+}
+
+class FlowControl {
+    private blocked = false
+    private blocked$ = new BehaviorSubject<boolean>(false)
+    private pendingCallbacks = 0
+    private lowWatermark = 5
+    private highWatermark = 10
+    private bytesWritten = 0
+    private bytesThreshold = 1024 * 128
+
+    constructor (private xterm: Terminal) { }
+
+    async write (data: string) {
+        if (this.blocked) {
+            await firstValueFrom(this.blocked$.pipe(filter(x => !x)))
+        }
+        this.bytesWritten += data.length
+        if (this.bytesWritten > this.bytesThreshold) {
+            this.pendingCallbacks++
+            this.bytesWritten = 0
+            if (!this.blocked && this.pendingCallbacks > this.highWatermark) {
+                this.blocked = true
+                this.blocked$.next(true)
+            }
+            this.xterm.write(data, () => {
+                this.pendingCallbacks--
+                if (this.blocked && this.pendingCallbacks < this.lowWatermark) {
+                    this.blocked = false
+                    this.blocked$.next(false)
+                }
+            })
+        } else {
+            this.xterm.write(data)
+        }
+    }
+}
+
+/** @hidden */
+export class XTermFrontend extends Frontend {
+    enableResizing = true
+    xterm: Terminal
+    protected xtermCore: any
+    protected enableWebGL = false
+    private element?: HTMLElement
+    private configuredFontSize = 0
+    private configuredLinePadding = 0
+    private zoom = 0
+    private resizeHandler: () => void
+    private configuredTheme: ITheme = {}
+    private copyOnSelect = false
+    private preventNextOnSelectionChangeEvent = false
+    private search = new SearchAddon()
+    private searchState: SearchState = { resultCount: 0 }
+    private fitAddon = new FitAddon()
+    private serializeAddon = new SerializeAddon()
+    private ligaturesAddon?: LigaturesAddon
+    private webGLAddon?: WebglAddon
+    private canvasAddon?: CanvasAddon
+    private opened = false
+    private resizeObserver?: any
+    private flowControl: FlowControl
+    private pinnedToBottom = true
+    private pendingRendererRecovery = false
+    private rendererRecoveryAttempts = 0
+
+    private configService: ConfigService
+    private hotkeysService: HotkeysService
+    private platformService: PlatformService
+    private hostApp: HostAppService
+    private themes: ThemesService
+
+    /**
+     * Reserves terminal rows and anchors a DOM block to them. The rows are
+     * local-only xterm content and are never sent to the remote session.
+     */
+    registerInlineBlock (
+        host: HTMLElement,
+        initialHeight = 4,
+        maximumHeight = 24,
+    ): Promise<InlineBlockDecoration|null> {
+        if (this.isAlternateScreenActive()) {
+            return Promise.resolve(null)
+        }
+        const reservedRows = Math.max(1, Math.min(Math.floor(initialHeight), this.xterm.rows - 1))
+        const maximumRows = Math.max(reservedRows, Math.floor(maximumHeight))
+        return new Promise(resolve => {
+            // The cursor is still on the line that triggered AI. Keep that
+            // line visible, reserve the following rows for the block and leave
+            // the cursor one row below it for subsequent SSH output.
+            this.xterm.write('\r\n'.repeat(reservedRows + 1), () => {
+                const marker = this.xterm.registerMarker(-reservedRows) as IMarker|undefined
+                if (!marker) {
+                    resolve(null)
+                    return
+                }
+                const decoration = this.xterm.registerDecoration({
+                    marker,
+                    x: 0,
+                    width: this.xterm.cols,
+                    height: reservedRows,
+                    layer: 'top',
+                })
+                if (!decoration) {
+                    marker.dispose()
+                    resolve(null)
+                    return
+                }
+                const control = new XTermInlineBlockDecoration(
+                    this.xterm,
+                    this.xtermCore,
+                    marker,
+                    decoration,
+                    host,
+                    reservedRows,
+                    reservedRows,
+                    maximumRows,
+                )
+                resolve(control)
+            })
+        })
+    }
+
+    constructor (injector: Injector) {
+        super(injector)
+        this.configService = injector.get(ConfigService)
+        this.hotkeysService = injector.get(HotkeysService)
+        this.platformService = injector.get(PlatformService)
+        this.hostApp = injector.get(HostAppService)
+        this.themes = injector.get(ThemesService)
+
+        this.xterm = new Terminal({
+            allowTransparency: true,
+            allowProposedApi: true,
+            overviewRulerWidth: 8,
+            windowsPty: process.platform === 'win32' ? {
+                backend: this.configService.store.terminal.useConPTY ? 'conpty' : 'winpty',
+                buildNumber: getWindows10Build(),
+            } : undefined,
+        })
+        this.flowControl = new FlowControl(this.xterm)
+        this.xtermCore = this.xterm['_core']
+
+        this.xterm.onBinary(data => {
+            this.input.next(Buffer.from(data, 'binary'))
+        })
+        this.xterm.onData(data => {
+            this.input.next(Buffer.from(data, 'utf-8'))
+        })
+        this.xterm.onResize(({ cols, rows }) => {
+            this.resize.next({ rows, columns: cols })
+        })
+        this.xterm.onTitleChange(title => {
+            this.title.next(title)
+        })
+        this.xterm.onSelectionChange(() => {
+            if (this.getSelection()) {
+                if (this.copyOnSelect && !this.preventNextOnSelectionChangeEvent) {
+                    this.copySelection()
+                }
+                this.preventNextOnSelectionChangeEvent = false
+            }
+        })
+        this.xterm.onBell(() => {
+            this.bell.next()
+        })
+
+        this.xterm.loadAddon(this.fitAddon)
+        this.xterm.loadAddon(this.serializeAddon)
+        this.xterm.loadAddon(new Unicode11Addon())
+        this.xterm.unicode.activeVersion = '11'
+
+        if (this.configService.store.terminal.sixel) {
+            this.xterm.loadAddon(new ImageAddon())
+        }
+
+        const keyboardEventHandler = (name: string, event: KeyboardEvent) => {
+            if (this.isAlternateScreenActive()) {
+                let modifiers = 0
+                modifiers += event.ctrlKey ? 1 : 0
+                modifiers += event.altKey ? 1 : 0
+                modifiers += event.shiftKey ? 1 : 0
+                modifiers += event.metaKey ? 1 : 0
+                if (event.key.startsWith('Arrow') && modifiers === 1) {
+                    return true
+                }
+            }
+
+            // Ctrl-/
+            if (event.type === 'keydown' && event.key === '/' && event.ctrlKey) {
+                this.input.next(Buffer.from('\u001f', 'binary'))
+                return false
+            }
+
+            // Ctrl-@
+            if (event.type === 'keydown' && event.key === '@' && event.ctrlKey) {
+                this.input.next(Buffer.from('\u0000', 'binary'))
+                return false
+            }
+
+            this.hotkeysService.pushKeyEvent(name, event)
+
+            let ret = true
+            if (this.hotkeysService.matchActiveHotkey(true) !== null) {
+                event.stopPropagation()
+                event.preventDefault()
+                ret = false
+            }
+            return ret
+        }
+
+        this.xterm.attachCustomKeyEventHandler((event: KeyboardEvent) => {
+            this.keyEvent.next(event)
+            if (event.defaultPrevented) {
+                return false
+            }
+            if (this.hostApp.platform !== Platform.Web) {
+                if (
+                    event.getModifierState('Meta') && event.key.toLowerCase() === 'v' ||
+                    event.key === 'Insert' && event.shiftKey
+                ) {
+                    event.preventDefault()
+                    return false
+                }
+            }
+            if (event.getModifierState('Meta') && event.key.startsWith('Arrow')) {
+                return false
+            }
+
+            return keyboardEventHandler('keydown', event)
+        })
+
+        this.xtermCore._scrollToBottom = this.xtermCore.scrollToBottom.bind(this.xtermCore)
+        this.xtermCore.scrollToBottom = () => null
+
+        // NOTE: xterm.onScroll only fires for content-driven scroll (new lines),
+        // NOT for user wheel/keyboard scroll (xterm.js #3864, #3201). During
+        // fast output, viewportY transiently equals baseY during xterm's
+        // internal processing, so onScroll would falsely re-pin. We do NOT
+        // use onScroll for pin state. Re-pinning happens only via:
+        //   - wheel/keyboard event listeners (below)
+        //   - explicit scrollToBottom() calls
+
+        const doResize = () => {
+            try {
+                if (this.xterm.element && getComputedStyle(this.xterm.element).getPropertyValue('height') !== 'auto') {
+                    const savedPinned = this.pinnedToBottom
+                    const savedViewportY = this.xterm.buffer.active.viewportY
+
+                    this.fitAddon.fit()
+                    this.xtermCore.viewport._refresh()
+
+                    if (savedPinned) {
+                        this.xtermCore._scrollToBottom()
+                    } else {
+                        // Restore the previous scroll position after fit
+                        const maxScroll = this.xterm.buffer.active.baseY
+                        const targetY = Math.min(savedViewportY, maxScroll)
+                        this.xterm.scrollToLine(targetY)
+                    }
+
+                    // fitAddon.fit() resizes the renderer's drawing buffer,
+                    // which blanks it synchronously, but xterm only repaints on
+                    // the next animation frame — leaving one blank frame that
+                    // reads as flicker during a window drag. Force the repaint
+                    // now (after scrolling settles) to close that gap.
+                    this.xtermCore._renderService?._renderRows(0, this.xterm.rows - 1)
+                }
+            } catch (e) {
+                // tends to throw when element wasn't shown yet
+                console.warn('Could not resize xterm', e)
+            }
+        }
+
+        // Rate-limit reflows during a window drag. The window 'resize' event and
+        // the ResizeObserver fire many times per frame; each reflow resizes the
+        // renderer's drawing buffer and re-uploads the glyph atlas texture. At
+        // full frame rate a fast drag issues reflows faster than the GPU can
+        // finish one, so frames composite with the text not yet repainted —
+        // visible as a flicker that only shows up when dragging quickly (slow
+        // drags leave enough time between reflows). Capping the reflow rate and
+        // always running a trailing fit keeps the final size correct without
+        // outrunning the renderer. Tune RESIZE_MIN_INTERVAL if needed.
+        const RESIZE_MIN_INTERVAL = 32
+        let resizePending = false
+        let lastResize = 0
+        const runResize = () => {
+            resizePending = false
+            lastResize = Date.now()
+            doResize()
+        }
+        this.resizeHandler = () => {
+            if (resizePending) {
+                return
+            }
+            resizePending = true
+            const wait = Math.max(0, RESIZE_MIN_INTERVAL - (Date.now() - lastResize))
+            if (wait > 0) {
+                setTimeout(() => requestAnimationFrame(runResize), wait)
+            } else {
+                requestAnimationFrame(runResize)
+            }
+        }
+
+        const oldKeyUp = this.xtermCore._keyUp.bind(this.xtermCore)
+        this.xtermCore._keyUp = (e: KeyboardEvent) => {
+            this.xtermCore.updateCursorStyle(e)
+            if (keyboardEventHandler('keyup', e)) {
+                oldKeyUp(e)
+            }
+        }
+
+        this.xterm.buffer.onBufferChange(() => {
+            const altBufferActive = this.xterm.buffer.active.type === 'alternate'
+            this.alternateScreenActive.next(altBufferActive)
+        })
+    }
+
+    private isAtBottom (): boolean {
+        const buffer = this.xterm.buffer.active
+        return buffer.viewportY >= buffer.baseY - 1
+    }
+
+    private updatePinnedState (): void {
+        this.pinnedToBottom = this.isAtBottom()
+    }
+
+    async attach (host: HTMLElement, profile: BaseTerminalProfile): Promise<void> {
+        this.element = host
+
+        this.xterm.open(host)
+        this.opened = true
+
+        // Work around font loading bugs
+        await new Promise(resolve => setTimeout(resolve, this.hostApp.platform === Platform.Web ? 1000 : 0))
+
+        // Just configure the colors to avoid a flash
+        this.configureColors(profile.terminalColorScheme)
+
+        if (this.enableWebGL) {
+            this.attachWebGLAddon()
+            this.platformService.displayMetricsChanged$.pipe(
+                takeUntil(this.destroyed$),
+            ).subscribe(() => {
+                this.webGLAddon?.clearTextureAtlas()
+            })
+        } else {
+            this.canvasAddon = new CanvasAddon()
+            this.xterm.loadAddon(this.canvasAddon)
+            this.platformService.displayMetricsChanged$.pipe(
+                takeUntil(this.destroyed$),
+            ).subscribe(() => {
+                this.canvasAddon?.clearTextureAtlas()
+            })
+        }
+
+        // Allow an animation frame
+        await new Promise(r => setTimeout(r, 100))
+
+        this.ready.next()
+        this.ready.complete()
+
+        this.xterm.loadAddon(this.search)
+
+        this.search.onDidChangeResults(state => {
+            this.searchState = state
+        })
+
+        window.addEventListener('resize', this.resizeHandler)
+
+        // The GPU context is often dropped while the app is in the background;
+        // retry recovery once the window is focused again and WebGL is usable.
+        fromEvent(window, 'focus').pipe(
+            takeUntil(this.destroyed$),
+        ).subscribe(() => this.recoverRenderer())
+
+        this.resizeHandler()
+
+        // Allow an animation frame
+        await new Promise(r => setTimeout(r, 0))
+
+        // User-initiated scroll detection: only wheel and keyboard events
+        // should unpin. xterm.onScroll is content-driven only and must never
+        // unpin (see constructor comment). Use capture phase — xterm.js
+        // handles wheel/key events on its internal viewport element and may
+        // stop propagation, so bubbling listeners on host would never fire.
+        host.addEventListener('wheel', (event: WheelEvent) => {
+            // Immediately unpin on scroll-up so that writes arriving before
+            // the next animation frame don't yank the viewport back down.
+            if (event.deltaY < 0) {
+                this.pinnedToBottom = false
+            }
+            requestAnimationFrame(() => this.updatePinnedState())
+        }, { capture: true, passive: true })
+
+
+        this.hotkeysService.hotkey$
+            .pipe(
+                takeUntil(this.destroyed$),
+                filter(hk => [
+                    'scroll-up',
+                    'scroll-down',
+                    'scroll-page-up',
+                    'scroll-page-down',
+                    'scroll-to-top',
+                    'scroll-to-bottom',
+                ].includes(hk)),
+            ).subscribe(hk => {
+                if ([
+                    'scroll-up',
+                    'scroll-page-up',
+                    'scroll-to-top',
+                ].includes(hk)) {
+                    this.pinnedToBottom = false
+                }
+                requestAnimationFrame(() => this.updatePinnedState())
+            })
+
+        host.addEventListener('dragOver', (event: any) => this.dragOver.next(event))
+        host.addEventListener('drop', event => this.drop.next(event))
+
+        // Handle clipboard/menu clicks before xterm clears the selection or reports
+        // the same right click to a mouse-aware remote program such as Vim.
+        host.addEventListener('mousedown', event => this.mouseEvent.next(event), true)
+        host.addEventListener('mouseup', event => this.mouseEvent.next(event), true)
+        host.addEventListener('mousewheel', event => this.mouseEvent.next(event as MouseEvent))
+        host.addEventListener('contextmenu', event => {
+            event.preventDefault()
+            event.stopPropagation()
+        })
+
+        this.resizeObserver = new window['ResizeObserver'](() => this.resizeHandler())
+        this.resizeObserver.observe(host)
+    }
+
+    detach (_host: HTMLElement): void {
+        window.removeEventListener('resize', this.resizeHandler)
+        this.resizeObserver?.disconnect()
+        delete this.resizeObserver
+    }
+
+    destroy (): void {
+        super.destroy()
+        this.webGLAddon?.dispose()
+        this.canvasAddon?.dispose()
+        this.xterm.dispose()
+    }
+
+    getSelection (): string {
+        return this.xterm.getSelection()
+    }
+
+    copySelection (): void {
+        const text = this.getSelection()
+        if (!text.trim().length) {
+            return
+        }
+        if (text.length < 1024 * 32 && this.configService.store.terminal.copyAsHTML) {
+            this.platformService.setClipboard({
+                text: this.getSelection(),
+                html: this.getSelectionAsHTML(),
+            })
+        } else {
+            this.platformService.setClipboard({
+                text: this.getSelection(),
+            })
+        }
+    }
+
+    selectAll (): void {
+        this.xterm.selectAll()
+    }
+
+    clearSelection (): void {
+        this.xterm.clearSelection()
+    }
+
+    focus (): void {
+        setTimeout(() => this.xterm.focus())
+    }
+
+    async write (data: string): Promise<void> {
+        // Capture pinned state before the write — the async write yields
+        // to the event loop, and RAF callbacks (e.g. from wheel events)
+        // could change pinnedToBottom mid-write.
+        const wasPinned = this.pinnedToBottom
+        const savedViewportY = this.xterm.buffer.active.viewportY
+        await this.flowControl.write(data)
+        if (wasPinned) {
+            this.xtermCore._scrollToBottom()
+        } else {
+            // Restore scroll position — xterm internally disturbs viewportY
+            // during fast output, and the patched-out scrollToBottom no-op
+            // prevents xterm from correcting it.
+            const maxScroll = this.xterm.buffer.active.baseY
+            const targetY = Math.min(savedViewportY, maxScroll)
+            if (this.xterm.buffer.active.viewportY !== targetY) {
+                this.xterm.scrollToLine(targetY)
+            }
+        }
+    }
+
+    clear (): void {
+        this.xterm.clear()
+    }
+
+    resetTerminalModes (): void {
+        // Disable mouse tracking modes (normal, button-event, any-event)
+        // and SGR extended mouse mode to prevent stale mouse tracking
+        // from leaking escape sequences as text after session reconnection
+        this.xterm.write('\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l')
+        // Disable bracketed paste mode
+        this.xterm.write('\x1b[?2004l')
+    }
+
+    visualBell (): void {
+        if (this.element) {
+            this.element.style.animation = 'none'
+            // Force a synchronous reflow so the browser registers the cleared
+            // animation before it is reassigned. Without this, repeated bells
+            // arriving while a shake is still playing coalesce into a single
+            // frame and the animation fails to restart (#11303).
+            void this.element.offsetWidth
+            this.element.style.animation = 'terminalShakeFrames 0.3s ease'
+        }
+    }
+
+    scrollToTop (): void {
+        this.pinnedToBottom = false
+        this.xterm.scrollToTop()
+    }
+
+    scrollPages (pages: number): void {
+        this.xterm.scrollPages(pages)
+        this.updatePinnedState()
+    }
+
+    scrollLines (amount: number): void {
+        this.xterm.scrollLines(amount)
+        this.updatePinnedState()
+    }
+
+    scrollToBottom (): void {
+        if (this.pinnedToBottom && this.isAtBottom()) {
+            return
+        }
+        this.pinnedToBottom = true
+        this.xtermCore._scrollToBottom()
+    }
+
+    private configureColors (scheme: TerminalColorScheme | null): void {
+        const appColorScheme = this.themes._getActiveColorScheme()
+
+        scheme = scheme ?? appColorScheme
+
+        const theme: ITheme = {
+            foreground: scheme.foreground,
+            selectionBackground: scheme.selection ?? '#88888888',
+            selectionForeground: scheme.selectionForeground ?? undefined,
+            background: getXtermBackgroundColor(this.configService, this.themes, scheme),
+            cursor: scheme.cursor,
+            cursorAccent: scheme.cursorAccent,
+        }
+
+        for (let i = 0; i < COLOR_NAMES.length; i++) {
+            theme[COLOR_NAMES[i]] = scheme.colors[i]
+        }
+
+        if (this.configService.store.terminal.paletteGenerate) {
+            theme.extendedAnsi = generatePalette(
+                scheme.colors,
+                scheme.background,
+                scheme.foreground,
+                this.configService.store.terminal.paletteHarmonious,
+            )
+        }
+
+        if (!deepEqual(this.configuredTheme, theme)) {
+            this.xterm.options.theme = theme
+            this.configuredTheme = theme
+        }
+    }
+
+    configure (profile: BaseTerminalProfile): void {
+        const config = this.configService.store
+
+        setImmediate(() => {
+            if (this.xterm.cols && this.xterm.rows && this.xtermCore.charMeasure) {
+                if (this.xtermCore.charMeasure) {
+                    this.xtermCore.charMeasure.measure(this.xtermCore.options)
+                }
+                if (this.xtermCore.renderer) {
+                    this.xtermCore.renderer._updateDimensions()
+                }
+                this.resizeHandler()
+            }
+        })
+
+        this.xtermCore.browser.isWindows = this.hostApp.platform === Platform.Windows
+        this.xtermCore.browser.isLinux = this.hostApp.platform === Platform.Linux
+        this.xtermCore.browser.isMac = this.hostApp.platform === Platform.macOS
+
+        this.xterm.options.fontFamily = getCSSFontFamily(config)
+        this.xterm.options.cursorStyle = {
+            beam: 'bar',
+        }[config.terminal.cursor] || config.terminal.cursor
+        this.xterm.options.cursorBlink = config.terminal.cursorBlink
+        this.xterm.options.macOptionIsMeta = config.terminal.altIsMeta
+        this.xterm.options.scrollback = config.terminal.scrollbackLines
+        this.xterm.options.wordSeparator = config.terminal.wordSeparator
+        this.xterm.options.drawBoldTextInBrightColors = config.terminal.drawBoldTextInBrightColors
+        this.xterm.options.fontWeight = config.terminal.fontWeight
+        this.xterm.options.fontWeightBold = config.terminal.fontWeightBold
+        this.xterm.options.minimumContrastRatio = config.terminal.minimumContrastRatio
+        this.configuredFontSize = config.terminal.fontSize
+        this.configuredLinePadding = config.terminal.linePadding
+        this.setFontSize()
+
+        this.copyOnSelect = config.terminal.copyOnSelect
+
+        this.configureColors(profile.terminalColorScheme)
+
+        if (this.opened && config.terminal.ligatures && !this.ligaturesAddon && this.hostApp.platform !== Platform.Web) {
+            this.ligaturesAddon = new LigaturesAddon()
+            this.xterm.loadAddon(this.ligaturesAddon)
+        }
+    }
+
+    setZoom (zoom: number): void {
+        this.zoom = zoom
+        this.setFontSize()
+        this.resizeHandler()
+    }
+
+    private getSearchOptions (searchOptions?: SearchOptions): ISearchOptions {
+        return {
+            ...searchOptions,
+            decorations: {
+                matchOverviewRuler: '#888888',
+                activeMatchColorOverviewRuler: '#ffff00',
+                matchBackground: '#888888',
+                activeMatchBackground: '#ffff00',
+            },
+        }
+    }
+
+    private wrapSearchResult (result: boolean): SearchState {
+        if (!result) {
+            return { resultCount: 0 }
+        }
+        return this.searchState
+    }
+
+    findNext (term: string, searchOptions?: SearchOptions): SearchState {
+        if (this.copyOnSelect) {
+            this.preventNextOnSelectionChangeEvent = true
+        }
+        return this.wrapSearchResult(
+            this.search.findNext(term, this.getSearchOptions(searchOptions)),
+        )
+    }
+
+    findPrevious (term: string, searchOptions?: SearchOptions): SearchState {
+        if (this.copyOnSelect) {
+            this.preventNextOnSelectionChangeEvent = true
+        }
+        return this.wrapSearchResult(
+            this.search.findPrevious(term, this.getSearchOptions(searchOptions)),
+        )
+    }
+
+    cancelSearch (): void {
+        this.search.clearDecorations()
+        this.focus()
+    }
+
+    saveState (): any {
+        return this.serializeAddon.serialize({
+            excludeAltBuffer: true,
+            excludeModes: true,
+            scrollback: 1000,
+        })
+    }
+
+    restoreState (state: string): void {
+        this.xterm.write(state)
+    }
+
+    supportsBracketedPaste (): boolean {
+        return this.xterm.modes.bracketedPasteMode
+    }
+
+    isAlternateScreenActive (): boolean {
+        return this.xterm.buffer.active.type === 'alternate'
+    }
+
+    private setFontSize () {
+        const scale = Math.pow(1.1, this.zoom)
+        this.xterm.options.fontSize = this.configuredFontSize * scale
+        // eslint-disable-next-line @typescript-eslint/restrict-plus-operands
+        this.xterm.options.lineHeight = Math.max(1, (this.configuredFontSize + this.configuredLinePadding * 2) / this.configuredFontSize)
+        this.resizeHandler()
+    }
+
+    /**
+     * Redraw the terminal and recover the renderer when its tab is shown again.
+     * Reactivating clears stale renderer state left behind while the tab was
+     * hidden, and flushes any GPU context recovery deferred until now.
+     */
+    reactivate (): void {
+        // An app- or window-level GPU reset can blank the canvas without firing
+        // xterm's per-canvas contextlost event, so pendingRendererRecovery stays
+        // unset. Treat a WebGL frontend that has lost its addon as needing
+        // recovery too, so a shown-but-blank pane always gets its context back
+        // instead of relying on a manual window resize.
+        if (this.pendingRendererRecovery || this.enableWebGL && !this.webGLAddon) {
+            this.pendingRendererRecovery = true
+            this.recoverRenderer()
+        } else {
+            // The pane is shown with a live renderer, so any earlier transient
+            // losses shouldn't count against a future recovery — reset the budget
+            // to avoid permanently downgrading the pane to the DOM renderer.
+            this.rendererRecoveryAttempts = 0
+            this.redraw()
+        }
+    }
+
+    private attachWebGLAddon (): void {
+        const addon = new WebglAddon()
+        // xterm fires this when the GPU drops the canvas context (driver reset,
+        // backgrounded app, too many live contexts).
+        addon.onContextLoss(() => this.onWebGLContextLoss())
+        this.xterm.loadAddon(addon)
+        this.webGLAddon = addon
+    }
+
+    private onWebGLContextLoss (): void {
+        this.webGLAddon?.dispose()
+        this.webGLAddon = undefined
+        this.pendingRendererRecovery = true
+        this.recoverRenderer()
+    }
+
+    /**
+     * Recreate the WebGL renderer after a lost GPU context. A new context can
+     * only be created on a visible, focused canvas, so this no-ops while the
+     * tab is hidden and is retried on reactivation or window focus.
+     */
+    private recoverRenderer (): void {
+        if (!this.pendingRendererRecovery || !this.canRecoverRenderer()) {
+            return
+        }
+        this.pendingRendererRecovery = false
+        if (this.rendererRecoveryAttempts < MAX_WEBGL_RECOVERY_ATTEMPTS) {
+            this.rendererRecoveryAttempts++
+            this.attachWebGLAddon()
+        }
+        // Once the retry budget is exhausted xterm falls back to its DOM renderer.
+        this.redraw()
+    }
+
+    private canRecoverRenderer (): boolean {
+        return !!this.element && this.element.offsetParent !== null && document.hasFocus()
+    }
+
+    private redraw (): void {
+        const renderService = this.xtermCore._renderService
+        renderService?.clear()
+        // handleResize() alone is a no-op when cols/rows are unchanged
+        // resizeHandler() runs a real itAddon.fit() followed
+        // by an unconditional viewport._refresh(),
+        // forcing a full repaint
+        this.resizeHandler()
+        renderService?.handleResize(this.xterm.cols, this.xterm.rows)
+    }
+
+    private getSelectionAsHTML (): string {
+        return this.serializeAddon.serializeAsHTML({ includeGlobalBackground: true, onlySelection: true  })
+    }
+}
+
+/** @hidden */
+export class XTermWebGLFrontend extends XTermFrontend {
+    protected enableWebGL = true
+}

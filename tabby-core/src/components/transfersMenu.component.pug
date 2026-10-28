@@ -1,0 +1,22 @@
+.transfer-header
+    strong 文件传输
+    span.text-muted {{ activeCount ? activeCount + ' 个进行中' : '任务记录' }}
+    button.btn.btn-outline-secondary.btn-sm(type='button', *ngIf='finishedCount', (click)='clearFinished(); $event.stopPropagation()', aria-label='清除已结束的传输记录') 清除已结束
+    button.btn.btn-link.btn-sm.text-danger(type='button', *ngIf='activeCount', (click)='cancelAll(); $event.stopPropagation()', aria-label='取消全部正在传输的文件') 取消全部
+.transfer(*ngFor='let transfer of transfers')
+    .icon(aria-hidden='true')
+        i.fas([class.fa-download]='isDownload(transfer)', [class.fa-upload]='!isDownload(transfer)')
+    .main
+        .name-line
+            span.file-name([ngbTooltip]='transfer.getName()') {{ transfer.getName() }}
+            span.transfer-state([class.text-danger]='transfer.getError()', [class.text-success]='transfer.isComplete()') {{ stateLabel(transfer) }}
+        .transfer-path(*ngIf='transfer.getDestination()', [title]='transfer.getSource() + " → " + transfer.getDestination()')
+            | {{ isDownload(transfer) ? '下载到：' : '上传到：' }}{{ transfer.getDestination() }}
+        ngb-progressbar([type]='transfer.isComplete() ? "success" : transfer.isCancelled() ? "danger" : "info"', [value]='getProgress(transfer)', [ariaLabel]='transfer.getName() + "传输进度"')
+        .metadata
+            span(*ngIf='!transfer.isComplete()') {{ transfer.getCompletedBytes()|filesize }} /&nbsp;
+            span {{ transfer.getSize()|filesize }}
+            span.progress-number {{ getProgress(transfer) }}%
+            span.speed(*ngIf='isActive(transfer) && transfer.getSpeed()') {{ transfer.getSpeed()|filesize }}/s
+        .transfer-error(*ngIf='transfer.getError()', role='status') {{ transfer.getError() }}
+    button.btn.btn-sm.transfer-action(type='button', [class.btn-outline-danger]='isActive(transfer)', [class.btn-outline-secondary]='!isActive(transfer)', (click)='removeTransfer(transfer); $event.stopPropagation()', [attr.aria-label]='(isActive(transfer) ? "取消传输：" : "移除记录：") + transfer.getName()') {{ isActive(transfer) ? '取消' : '移除' }}

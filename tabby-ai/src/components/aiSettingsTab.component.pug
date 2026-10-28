@@ -1,0 +1,232 @@
+h3 AI
+.alert.alert-warning(*ngIf='loadError')
+    strong AI 配置加载失败，当前使用默认配置。
+    div {{ loadError }}
+.alert.alert-warning(*ngIf='credentialNotice', role='status') {{ credentialNotice }}
+.ai-settings-tabs(role='tablist')
+    button.btn.btn-sm(*ngFor='let item of sections', type='button', role='tab', [class.active]='section === item.id', [attr.aria-selected]='section === item.id', (click)='section = item.id') {{ item.label }}
+ng-container(*ngIf='model')
+    .settings-section(*ngIf='section === "model"')
+        .form-line
+            .header
+                .title API Base URL
+            input.form-control(type='text', [(ngModel)]='model.llm.baseURL', (ngModelChange)='markChanged()')
+
+        .form-line
+            .header
+                .title API Key
+            input.form-control(type='password', [(ngModel)]='model.llm.apiKey', (ngModelChange)='markChanged()', autocomplete='off')
+        p.setting-help {{configService.isCredentialReference(model.llm.apiKey) ? '已在本地保存。输入新密钥即可替换，使用时自动读取，无需主密码。' : '密钥保存在本地数据目录，自动读取，不写入系统凭证管理器。'}}
+
+        .form-line
+            .header
+                .title Model
+            .input-group
+                input.form-control(type='text', [(ngModel)]='model.llm.model', (ngModelChange)='markChanged()')
+                button.btn.btn-outline-secondary.model-picker-button(
+                    type='button',
+                    (click)='loadModels()',
+                    [disabled]='loadingModels || !model.llm.baseURL',
+                    title='Read available model IDs from /models'
+                )
+                    span(*ngIf='!loadingModels') Models
+                    span(*ngIf='loadingModels') Loading…
+
+        .model-picker(*ngIf='modelPickerVisible')
+            .model-picker-message(*ngIf='loadingModels') Reading available models…
+            select.form-select.model-picker-list(
+                *ngIf='!loadingModels && availableModels.length',
+                [ngModel]='model.llm.model',
+                (ngModelChange)='selectModel($event)',
+                [attr.size]='modelListSize',
+                aria-label='Available upstream model IDs'
+            )
+                option(*ngFor='let modelId of availableModels', [value]='modelId', [title]='modelId') {{ modelId }}
+            .model-picker-summary(*ngIf='!loadingModels && availableModels.length')
+                | {{ availableModels.length }} model(s)
+            .model-picker-message(
+                *ngIf='!loadingModels && modelListResult && !modelListResult.success',
+                class='model-picker-error'
+            ) {{ modelListResult.message }}
+            .model-picker-message(
+                *ngIf='!loadingModels && modelListResult && modelListResult.success && !availableModels.length'
+            ) No models were returned by /models.
+
+        .form-line
+            .header
+                .title Temperature
+            input.form-control(type='number', min='0', max='2', step='0.1', [(ngModel)]='model.llm.temperature', (ngModelChange)='markChanged()')
+
+        .form-line
+            .header
+                .title Request timeout (milliseconds)
+            input.form-control(type='number', min='1000', step='1000', [(ngModel)]='model.llm.timeout', (ngModelChange)='markChanged()')
+
+        .form-line
+            .header
+                .title Maximum concurrent agents
+            input.form-control(type='number', min='1', step='1', [(ngModel)]='model.agent.maxConcurrentRuns', (ngModelChange)='markChanged()')
+
+        .form-line
+            .header
+                .title 上下文 Token 上限
+            input.form-control(type='number', min='1000', step='1000', [(ngModel)]='model.agent.maxContextTokens')
+        .form-line
+            .header
+                .title 最近终端输出行数
+            input.form-control(type='number', min='1', [(ngModel)]='model.agent.recentOutputLines')
+        button.btn.btn-outline-secondary(type='button', (click)='testConnection()', [disabled]='testing || !model.llm.baseURL || !model.llm.model') {{ testing ? '检查中…' : '检查模型可用性' }}
+        button.btn.btn-link(type='button', *ngIf='testing', (click)='cancelCheck()') 取消检查
+        p.setting-help 使用当前填写的配置发起少量模型请求，可能消耗额度。工具为本地模拟，不连接 SSH，也不执行服务器命令。
+        .model-checks(*ngIf='modelChecks.length', aria-live='polite')
+            .model-check(*ngFor='let check of modelChecks', [class.text-success]='check.state === "passed"', [class.text-warning]='check.state === "failed"')
+                strong {{check.label}}
+                span {{check.state === 'pending' ? '等待检查' : check.state === 'running' ? '检查中…' : check.message}}
+        .alert.mt-2(*ngIf='connectionResult', [class.alert-success]='connectionResult.success', [class.alert-danger]='!connectionResult.success') {{ connectionResult.message }}
+    .settings-section(*ngIf='section === "input"')
+        p.setting-help 在终端直接输入：Shell 命令交给终端，自然语言交给 Agent。识别在本地完成。
+        label(for='ai-shell-commands') Shell 命令名
+        p.setting-help 每行一个，例如 docker、git。列表中的命令会直接交给 Shell。
+        textarea#ai-shell-commands.form-control.command-list(rows='10', [(ngModel)]='shellCommands', spellcheck='false')
+        label(for='ai-shell-patterns') Shell 正则规则
+        p.setting-help 每行一条 JavaScript 正则表达式，不加两侧斜杠。用于补充命令识别；明确的自然语言仍交给 Agent。
+        textarea#ai-shell-patterns.form-control.command-list(rows='6', [(ngModel)]='shellPatterns', spellcheck='false')
+        .form-line
+            .header
+                .title 强制发送 Agent 快捷键
+            input.form-control(type='text', [(ngModel)]='model.inputDetection.forceAgentShortcut', placeholder='Shift+Enter', aria-label='强制发送 Agent 快捷键')
+        .form-line
+            .header
+                .title 强制发送 Shell 快捷键
+            input.form-control(type='text', [(ngModel)]='model.inputDetection.forceShellShortcut', placeholder='Ctrl+Enter', aria-label='强制发送 Shell 快捷键')
+    .settings-section(*ngIf='section === "web"')
+        .form-line
+            .header
+                .title 联网模式
+            select.form-select([(ngModel)]='web.mode', (ngModelChange)='markWebChanged()', aria-label='联网模式')
+                option(value='off') 关闭
+                option(value='auto') 按需自动搜索
+                option(value='manual') 仅明确要求时搜索
+        p.setting-help “仅明确要求”时，请在问题中写明“联网搜索”“查文档”，或提供网页链接。请求从本地 Ash 发出。
+        .form-line
+            .header
+                .title SearXNG 服务地址
+            input.form-control(type='url', [(ngModel)]='web.baseURL', (ngModelChange)='markWebChanged()', placeholder='https://search.example.com', aria-label='SearXNG 服务地址')
+        p.setting-help 填写服务根地址，支持自建内网地址和子路径，不需要填写 /search。服务端需要启用 JSON 格式。
+        .form-line
+            .header
+                .title 认证信息（可选）
+            input.form-control(type='password', [(ngModel)]='web.authorization', (ngModelChange)='markWebChanged()', placeholder='Bearer … 或 Basic …', autocomplete='off', aria-label='搜索服务认证信息')
+        p.setting-help 仅用于反向代理的 Authorization 请求头，与模型密钥一样保存在本地配置文件中，不会发给网页或模型。
+        button.btn.btn-outline-secondary(type='button', (click)='testWeb()', [disabled]='webTesting || !web.baseURL') 测试搜索连接
+        hr
+        label.toggle-row
+            input(type='checkbox', [(ngModel)]='web.useDefaultModel', (ngModelChange)='markWebChanged()')
+            span 使用默认模型
+        p.setting-help(*ngIf='web.useDefaultModel') 跟随“模型连接”配置，由主 Agent 直接搜索并阅读资料。
+        ng-container(*ngIf='!web.useDefaultModel')
+            p.setting-help 独立模型负责检索和整理网页资料，主 Agent 继续使用默认模型分析服务器和执行命令。
+            .form-line
+                .header
+                    .title API Base URL
+                input.form-control(type='url', [(ngModel)]='web.model.baseURL', (ngModelChange)='markWebChanged()', placeholder='https://api.example.com/v1', aria-label='联网模型 API Base URL')
+            .form-line
+                .header
+                    .title API Key
+                input.form-control(type='password', [(ngModel)]='web.model.apiKey', (ngModelChange)='markWebChanged()', autocomplete='off', aria-label='联网模型 API Key')
+            .form-line
+                .header
+                    .title 模型名称
+                input.form-control(type='text', [(ngModel)]='web.model.model', (ngModelChange)='markWebChanged()', aria-label='联网模型名称')
+            .form-line
+                .header
+                    .title 模型超时（毫秒）
+                input.form-control(type='number', min='1000', max='300000', step='1000', [(ngModel)]='web.model.timeout', (ngModelChange)='markWebChanged()', aria-label='联网模型超时')
+            button.btn.btn-outline-secondary(type='button', (click)='testWeb(true)', [disabled]='webTesting || !web.model.baseURL || !web.model.model') 测试联网模型
+            p.setting-help 测试会调用当前填写的模型，可能消耗模型额度。失败时不会自动切换到默认模型。
+        button.btn.btn-link(type='button', *ngIf='webTesting', (click)='cancelWebCheck()') 取消检查
+        .alert.mt-2(*ngIf='webResult', [class.alert-success]='webResult.success', [class.alert-danger]='!webResult.success', role='status') {{ webResult.message }}
+        details.mt-3
+            summary 高级设置
+            .form-line
+                .header
+                    .title 搜索语言
+                input.form-control(type='text', [(ngModel)]='web.language', (ngModelChange)='markWebChanged()', placeholder='auto / zh-CN / en', aria-label='搜索语言')
+            p.setting-help 填写 auto 或留空时使用 SearXNG 服务端默认语言；指定语言时填写服务支持的语言代码，如 zh-CN 或 en。
+            .form-line
+                .header
+                    .title 搜索引擎
+                input.form-control(type='text', [ngModel]='web.engines.join(", ")', (ngModelChange)='setWebEngines($event)', placeholder='留空使用服务端配置', aria-label='搜索引擎')
+            .form-line
+                .header
+                    .title 网络超时（毫秒）
+                input.form-control(type='number', min='1000', max='120000', step='1000', [(ngModel)]='web.timeoutMs', (ngModelChange)='markWebChanged()', aria-label='网络超时')
+            .form-line
+                .header
+                    .title 每次搜索结果数
+                input.form-control(type='number', min='1', max='10', [(ngModel)]='web.maxResults', (ngModelChange)='markWebChanged()', aria-label='搜索结果数')
+            .form-line
+                .header
+                    .title 每轮联网调用上限
+                input.form-control(type='number', min='1', max='20', [(ngModel)]='web.maxCallsPerRun', (ngModelChange)='markWebChanged()', aria-label='联网调用上限')
+            .form-line
+                .header
+                    .title 单页正文字符上限
+                input.form-control(type='number', min='1000', max='30000', step='1000', [(ngModel)]='web.maxPageChars', (ngModelChange)='markWebChanged()', aria-label='正文字符上限')
+    .settings-section(*ngIf='section === "policy"')
+        label(for='ai-approval-mode') 默认执行权限
+        select#ai-approval-mode.form-select([(ngModel)]='model.policy.approvalMode', [class.permission-full]='model.policy.approvalMode === "full"', [class.permission-unrestricted]='model.policy.approvalMode === "unrestricted"')
+            option(*ngFor='let mode of permissions.modes', [value]='mode.value') {{ mode.label }}
+        ng-container(*ngFor='let mode of permissions.modes')
+            p.setting-help(*ngIf='model.policy.approvalMode === mode.value', [class.permission-full]='mode.value === "full"', [class.permission-unrestricted]='mode.value === "unrestricted"') {{ mode.description }}
+        .form-line
+            .header
+                .title 未匹配命令的风险
+            select.form-select([(ngModel)]='model.policy.defaultRisk', aria-label='未匹配命令的风险')
+                option(*ngFor='let risk of risks', [value]='risk.value') {{ risk.label }}
+        .rules-heading
+            label 命令规则
+            button.btn.btn-sm.btn-outline-secondary(type='button', (click)='addRule()') 添加命令
+        p.text-muted 填写命令或子命令，如 git status。规则也匹配后续参数；危险和禁止规则优先。
+        .command-rule(*ngFor='let rule of model.policy.commandRules; let i = index')
+            input.form-control(type='text', [(ngModel)]='rule.command', placeholder='例如 git status', aria-label='命令或子命令', spellcheck='false')
+            select.form-select([(ngModel)]='rule.risk', aria-label='命令风险')
+                option(*ngFor='let risk of risks', [value]='risk.value') {{ risk.label }}
+            button.btn.btn-sm.btn-link(type='button', (click)='model.policy.commandRules.splice(i, 1)', aria-label='删除命令规则', title='删除规则')
+                i.fas.fa-xmark
+        p.text-muted(*ngIf='!model.policy.commandRules.length') 暂无自定义命令，使用内置及配置文件中的规则。
+        p.setting-help 权限档位决定是否审批。以上风险标签展示“按配置执行”时的处理方式。
+    .settings-section(*ngIf='section === "redaction"')
+        label.toggle-row
+            input(type='checkbox', [(ngModel)]='model.redaction.enabled')
+            span 启用额外脱敏规则
+        p.setting-help 普通模式会隐藏已识别的凭据；“放手一搏”按所选权限放开。识别规则无法覆盖所有秘密，可在模型上下文中审查实际请求。
+        p.text-muted 在内容发送给模型和写入会话记录前替换匹配的敏感信息。
+        label.toggle-row(*ngFor='let rule of model.redaction.patterns')
+            input(type='checkbox', [ngModel]='rule.enabled !== false', (ngModelChange)='rule.enabled = $event', [disabled]='!model.redaction.enabled')
+            span {{ rule.name }}
+        p.setting-help 密码和 Token 的临时输入、占位符及本地恢复继续独立保留。
+    .command-preview(*ngIf='section === "input" || section === "policy"')
+        label(for='ai-command-preview') 试一下规则
+        .input-group
+            input#ai-command-preview.form-control(type='text', [(ngModel)]='previewCommand', placeholder='输入一条命令，不会实际执行')
+            button.btn.btn-outline-secondary(type='button', (click)='preview()') 检查
+        p.setting-help(*ngIf='previewResult', role='status') {{ previewResult }}
+        small.text-muted 预览使用通用 Shell 语法；实际执行会结合当前 Shell 检查。
+    .settings-section.credentials-section(*ngIf='section === "credentials"')
+        h4 已保存的凭证
+        p.setting-help 查看本地已保存的凭据。Agent 业务密码仅在当前任务内使用，不自动保存。
+        button.btn.btn-outline-secondary(type='button', (click)='loadCredentials()', [disabled]='credentialsBusy') {{credentialsBusy ? '正在读取…' : credentialsLoaded ? '刷新凭证' : '解锁并查看'}}
+        p.setting-help(*ngIf='credentialsLoaded && !credentials.length') 没有以前保存的 Agent 凭证。任务需要密码时会通过表单向你索取。
+        .credential-row(*ngFor='let credential of credentials')
+            .credential-content
+                strong {{credential.description}}
+                code(*ngIf='credentialValues.get(credential.reference) as value') {{value}}
+            .credential-actions
+                button.btn.btn-sm.btn-link(type='button', (click)='showCredential(credential.reference)') {{credentialValues.has(credential.reference) ? '隐藏' : '查看'}}
+                button.btn.btn-sm.btn-outline-secondary(type='button', (click)='copyCredential(credential.reference)') 复制
+        p.setting-help.mt-3 SSH 密码和模型 API Key 可在设置的“保险库”中管理，无需主密码。移动软件时，请一并保留 data 目录。
+    .settings-actions(*ngIf='section !== "credentials"')
+        button.btn.btn-primary(type='button', (click)='save()', [disabled]='saving') {{ saving ? '保存中…' : '保存' }}
+        button.btn.btn-outline-secondary(type='button', (click)='restoreDefaults()', [disabled]='saving') 恢复本页默认
+        span.text-muted 保存后生效

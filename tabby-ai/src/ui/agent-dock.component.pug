@@ -1,0 +1,66 @@
+.agent-controls((keydown)='$event.stopPropagation()', (keyup)='$event.stopPropagation()', (mousedown)='$event.stopPropagation()', (click)='$event.stopPropagation()')
+    .agent-main
+        .mode-bar
+            button.btn.btn-sm.btn-link.mode-button(type='button', (click)='toggleMode()', [disabled]='!configReady', [attr.aria-pressed]='runtime.terminal.value.mode === "agent"') {{ runtime.terminal.value.mode === 'agent' ? 'Agent 模式' : 'Shell 模式' }}
+            ng-container(*ngIf='configReady && runtime.terminal.value.mode === "agent"')
+                select.form-select.form-select-sm.permission-select(#permissionSelect, [ngModel]='runtime.approvalMode || ""', (ngModelChange)='changePermission($event, permissionSelect)', [disabled]='changingPermission', [class.permission-full]='permissions.mode(runtime) === "full"', [class.permission-unrestricted]='permissions.mode(runtime) === "unrestricted"', aria-label='Agent 执行权限', title='仅此连接生效，从下一条命令开始应用；重新连接后跟随设置')
+                    option(value='') 跟随设置 · {{ defaultPermissionLabel }}
+                    option(*ngFor='let mode of permissions.modes', [value]='mode.value') {{ mode.label }}
+            button.btn.btn-sm.btn-link.context-toggle(#contextToggle, type='button', (click)='toggleContext()', [attr.aria-expanded]='showContext', [class.active]='showContext')
+                i.fas.fa-align-left(aria-hidden='true')
+                span 模型上下文
+            span.agent-status(*ngIf='runtime.activeRunId && runtime.terminal.value.mode === "agent"', role='status') {{ statusLabel }}
+            button.btn.btn-sm.btn-link.stop-button(*ngIf='runtime.activeRunId && runtime.terminal.value.mode === "agent"', type='button', (click)='stopAgent()') 停止 Agent
+        .notice(*ngIf='runtime.terminal.value.notice', role='status') {{ runtime.terminal.value.notice }}
+        .notice(*ngIf='runtime.terminal.value.failureReason')
+            button.btn.btn-sm.btn-link.retry-integration(type='button', (click)='retryIntegration()', [disabled]='runtime.terminal.value.state !== "unavailable" || !!runtime.activeRunId || runtime.locked') 重试 Agent 连接
+            button.btn.btn-sm.btn-link(type='button', (click)='showFailure = !showFailure', [attr.aria-expanded]='showFailure') {{showFailure ? '收起原因' : '查看原因'}}
+            pre.text-break(*ngIf='showFailure') {{runtime.terminal.value.failureReason}}
+        ng-container(*ngIf='store.persistence | async as saving')
+            .notice.text-warning(*ngIf='saving.error', role='alert')
+                span {{saving.error}}。{{saving.pending ? '还有 ' + saving.pending + ' 条记录仅保存在内存中，退出程序可能丢失。' : '会话列表尚未保存。'}} 正在自动重试。
+                button.btn.btn-sm.btn-link(type='button', (click)='store.retrySaving()') 立即重试
+        .interaction-area(*ngIf='requests.length || forms.length')
+            .interaction(*ngFor='let request of requests')
+                .interaction-body
+                    .interaction-heading 待执行命令
+                    .request-reason {{ request.reason }}
+                    .command-risk(*ngIf='requestRisk(request) as risk', role='note')
+                        i.fas.fa-exclamation-triangle(aria-hidden='true')
+                        span {{ risk }}
+                    label([attr.for]='request.id') {{ request.risk === 'DANGEROUS' ? '危险命令 · 需要二次确认' : '命令审批' }}
+                    textarea.form-control([id]='request.id', rows='3', [ngModel]='commands.get(request.id)', (ngModelChange)='edit(request, $event)', spellcheck='false')
+                .actions
+                    button.btn.btn-sm.btn-secondary(type='button', (click)='reject(request)') 拒绝
+                    button.btn.btn-sm([class.btn-danger]='confirmed.has(request.id)', [class.btn-primary]='!confirmed.has(request.id)', type='button', (click)='approve(request)') {{ confirmed.has(request.id) ? '确认执行危险命令' : '允许执行' }}
+            .interaction(*ngFor='let form of forms')
+                .interaction-body
+                    .interaction-heading {{form.kind === 'password' ? '提供凭证' : '需要你的输入'}}
+                    label([attr.for]='form.id') {{ form.prompt }}
+                    .credential-note(*ngIf='form.kind === "password"') 仅本次任务使用，不保存到保险库；模型只收到替代标记。
+                    input.form-control([id]='form.id', [type]='form.kind === "password" ? "password" : "text"', [ngModel]='values.get(form.id)', (ngModelChange)='values.set(form.id, $event)', (keydown.enter)='submitForm(form); $event.preventDefault()', autocomplete='off', spellcheck='false')
+                    .credential-options(*ngIf='form.kind === "password"')
+                        button.btn.btn-sm.btn-link(type='button', (click)='generateCredential(form.id)') 生成随机密码
+                .actions
+                    button.btn.btn-sm.btn-secondary(type='button', (click)='submitForm(form, false)') 取消
+                    button.btn.btn-sm.btn-primary(type='button', (click)='submitForm(form)') 继续
+    aside.context-panel(#contextPanel, *ngIf='showContext', tabindex='-1', aria-label='模型上下文审查', (keydown.escape)='toggleContext(); $event.stopPropagation()')
+        .context-header
+            strong 模型上下文
+            button.btn.btn-sm.btn-link(type='button', (click)='toggleContext()', aria-label='关闭模型上下文')
+                i.fas.fa-times(aria-hidden='true')
+        ng-container(*ngIf='contextRequest as request; else noContext')
+            .context-meta {{request.model}} · {{request.time}}
+            .context-note 最近一次提交的请求正文。
+            .context-note(*ngIf='protectedFields(request.body)') 密码替代标记不包含原文；其他正文对模型可见。
+            .context-scroll
+                details.context-message(*ngFor='let message of contextMessages(request.body)', [open]='message.expanded')
+                    summary {{message.label}}
+                    pre {{message.text}}
+                details.context-raw
+                    summary 完整请求
+                    pre {{contextBody(request.body)}}
+        ng-template(#noContext)
+            .context-empty
+                strong 还没有发送内容
+                p 向 Agent 提问后，这里会显示实际发送的指令、对话和工具结果。

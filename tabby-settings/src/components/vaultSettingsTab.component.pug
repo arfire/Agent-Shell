@@ -1,0 +1,75 @@
+.text-center(*ngIf='!vault.isEnabled()')
+    i.fas.fa-key.fa-3x.m-3
+    h3.m-3(translate) Vault is not configured
+    .m-3 本地保存 SSH 密码和 API Key，自动读取，无需主密码。
+    button.btn.btn-primary.m-2((click)='enableVault()') 启用本地凭据保存
+
+
+div(*ngIf='vault.isEnabled()')
+    .d-flex.align-items-center.mb-3
+        h3.m-0(translate) Vault
+        .d-flex.ms-auto(ngbDropdown, *ngIf='vault.isEnabled()')
+            button.btn.btn-secondary(ngbDropdownToggle, translate) Options
+            div(ngbDropdownMenu)
+                a(ngbDropdownItem, (click)='disableVault()')
+                    i.fas.fa-fw.fa-radiation-alt
+                    span(translate) Erase the Vault
+
+    p.text-muted 凭据和自动读取密钥一起保存在数据目录中。便携版移动时请保留完整 data 目录；拥有完整目录的人可以读取已保存的凭据。
+    div(*ngIf='vaultContents')
+        .text-center(*ngIf='!vaultContents.secrets.length')
+            i.fas.fa-empty-set.fa-3x
+            h3.m-3(translate) Vault is empty
+
+        .list-group
+            .list-group-item.d-flex.align-items-center.p-1.ps-3(*ngFor='let secret of vaultContents.secrets')
+                i.fas.fa-key
+                .me-auto {{getSecretLabel(secret)}}
+
+                .hover-reveal(ngbDropdown)
+                    button.btn.btn-link(ngbDropdownToggle)
+                        i.fas.fa-ellipsis-v
+                    div(ngbDropdownMenu)
+                        button(ngbDropdownItem, (click)='showSecret(secret)')
+                            i.fas.fa-fw.fa-eye
+                            span(translate) Show
+                        button(
+                            ngbDropdownItem,
+                            *ngIf='secret.type === VAULT_SECRET_TYPE_FILE',
+                            (click)='renameFile(castAny(secret))'
+                        )
+                            i.fas.fa-fw.fa-pencil-alt
+                            span(translate) Rename
+                        button(
+                            ngbDropdownItem,
+                            *ngIf='secret.type === VAULT_SECRET_TYPE_FILE',
+                            (click)='replaceFileContent(castAny(secret))'
+                        )
+                            i.fas.fa-fw.fa-file-import
+                            span(translate) Replace
+                        button(
+                            ngbDropdownItem,
+                            *ngIf='secret.type === VAULT_SECRET_TYPE_FILE',
+                            (click)='exportFile(castAny(secret))'
+                        )
+                            i.fas.fa-fw.fa-file-export
+                            span(translate) Export
+                        button(ngbDropdownItem, (click)='removeSecret(secret)')
+                            i.fas.fa-fw.fa-trash
+                            span(translate) Delete
+
+        h3.mt-5(translate) Options
+        .form-line
+            .header
+                .title(translate) Encrypt config file
+                .description(translate) Puts all of Ash's configuration into the vault
+            toggle(
+                [ngModel]='config.store.encrypted',
+                (click)='toggleConfigEncrypted()',
+            )
+
+    .text-center(*ngIf='!vaultContents')
+        i.fas.fa-key.fa-3x
+        h3.m-3 已保存的凭据
+        p.text-danger(*ngIf='loadError', role='alert') {{loadError}}
+        button.btn.btn-primary.m-2((click)='loadVault()') 查看凭据

@@ -1,0 +1,74 @@
+:host {
+    display: flex;
+    flex-direction: column;
+
+    > .header {
+        padding: 5px 15px 0 20px;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        flex: none;
+    }
+
+    > .filter-bar {
+        flex: none;
+    }
+
+    > .body {
+        padding: 10px 20px;
+        flex: 1 1 0;
+        overflow-y: auto;
+    }
+
+    .breadcrumb {
+        background: none;
+        padding: 0;
+        margin: 0;
+    }
+
+    .breadcrumb-item {
+        cursor: pointer;
+    }
+
+    .breadcrumb-item:first-child {
+        font-weight: bold;
+    }
+
+    .list-group-item-action {
+        &:hover {
+            background: rgba(white, .05);
+        }
+    }
+
+    .mode, .size, .date {
+        font-family: monospace;
+        opacity: .5;
+        font-size: 12px;
+        text-align: right;
+        margin-left: 20px;
+    }
+
+    .size {
+        width: 100px;
+    }
+
+    .date {
+        width: 200px;
+    }
+
+    .list-group-item { min-width: 0; }
+    .list-group-item > div:first-of-type { overflow-wrap: anywhere; min-width: 0; }
+}
+
+:host-context(workspace-files) {
+    > .header { height: auto; min-height: 0; gap: 4px; padding-bottom: 8px; }
+    .breadcrumb { flex: 0 0 100%; overflow-wrap: anywhere; }
+    .breadcrumb-spacer { display: none; }
+    .mode, .date { display: none; }
+    .size { width: auto; margin-left: 8px; }
+    > .header, > .body { padding-left: 8px; padding-right: 8px; }
+}
+
+.btn-link svg {
+    width: 12px;
+}

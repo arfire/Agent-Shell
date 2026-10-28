@@ -1,0 +1,9 @@
+:host { display: flex; flex: none; min-height: 0; }
+.sidebar { position: relative; display: flex; flex-direction: column; min-height: 0; background: var(--theme-bg-more-2); border-right: 1px solid var(--theme-secondary); }
+nav { display: flex; flex: none; min-height: 38px; align-items: center; }
+nav .active { color: var(--theme-primary); border-bottom: 2px solid currentColor; }
+.panels { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.panels[hidden] { display: none; }
+profile-tree { flex: 1; min-height: 0; }
+.grabber { position: absolute; right: -3px; top: 38px; bottom: 0; width: 6px; cursor: col-resize; z-index: 2; }
+.mac-inset { padding-top: var(--tabs-height); }
