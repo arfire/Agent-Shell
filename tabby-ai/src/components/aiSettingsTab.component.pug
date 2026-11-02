@@ -194,8 +194,15 @@ ng-container(*ngIf='model')
                 option(*ngFor='let risk of risks', [value]='risk.value') {{ risk.label }}
             button.btn.btn-sm.btn-link(type='button', (click)='model.policy.commandRules.splice(i, 1)', aria-label='删除命令规则', title='删除规则')
                 i.fas.fa-xmark
-        p.text-muted(*ngIf='!model.policy.commandRules.length') 暂无自定义命令，使用内置及配置文件中的规则。
+        p.text-muted(*ngIf='!model.policy.commandRules.length') 暂无自定义命令，使用下方各级匹配规则及内置安全检查。
         p.setting-help 权限档位决定是否审批。以上风险标签展示“按配置执行”时的处理方式。
+        h4.mt-4 各级命令匹配规则
+        p.setting-help 这里显示配置中已有的全部匹配规则，可直接修改。每行一条 JavaScript 正则表达式，不加两侧斜杠；留空会清空该组。普通命令可在上方点击“添加命令”配置。
+        .policy-pattern-group(*ngFor='let group of policyGroups')
+            label([attr.for]='"ai-policy-" + group.key') {{ group.label }}
+            span.text-muted.ms-2 {{ model.policy[group.key].length }} 条规则
+            textarea.form-control.command-list([id]='"ai-policy-" + group.key', rows='4', [ngModel]='model.policy[group.key].join("\\n")', (ngModelChange)='setPolicyPatterns(group.key, $event)', spellcheck='false')
+        p.setting-help 危险和禁止规则优先；内置安全检查设定的最低风险仍然生效。可在下方“试一下规则”中检查尚未保存的修改，保存后应用到后续命令。
     .settings-section(*ngIf='section === "redaction"')
         label.toggle-row
             input(type='checkbox', [(ngModel)]='model.redaction.enabled')

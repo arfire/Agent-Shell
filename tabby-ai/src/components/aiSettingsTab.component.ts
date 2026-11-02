@@ -55,6 +55,13 @@ export class AISettingsTabComponent implements OnDestroy {
         { value: 'DANGEROUS', label: '危险 · 二次确认' }, { value: 'DENY', label: '禁止执行' },
     ]
 
+    readonly policyGroups = [
+        { key: 'autoApprove', label: '安全命令 · 自动执行' },
+        { key: 'requireApproval', label: '修改命令 · 单次确认' },
+        { key: 'requireSecondApproval', label: '危险命令 · 二次确认' },
+        { key: 'deny', label: '禁止执行的命令' },
+    ] as const
+
     shellCommands = ''
     shellPatterns = ''
     previewCommand = ''
@@ -259,6 +266,12 @@ export class AISettingsTabComponent implements OnDestroy {
         this.model?.policy.commandRules?.push({ command: '', risk: 'MODIFY' })
     }
 
+    setPolicyPatterns (key: typeof this.policyGroups[number]['key'], value: string): void {
+        if (!this.model) { return }
+        this.model.policy[key] = value.split(/\r?\n/).filter(pattern => pattern.trim())
+        this.previewResult = ''
+    }
+
     preview (): void {
         if (!this.model || !this.previewCommand.trim()) { this.previewResult = ''; return }
         this.syncCommands()
@@ -267,7 +280,8 @@ export class AISettingsTabComponent implements OnDestroy {
             const decision = this.policy.evaluate(this.previewCommand, undefined, this.model.policy)
             const action = approvalAction(decision.risk, this.model.policy.approvalMode ?? 'configured')
             const label = { execute: '自动执行', ask: decision.risk === 'DANGEROUS' ? '二次确认' : '需要审批', deny: '拦截' }[action]
-            this.previewResult = `自动识别：${shell ? 'Shell' : 'Agent'}；若由 Agent 执行：${label}。`
+            const risk = { SAFE: '安全', MODIFY: '修改', DANGEROUS: '危险', DENY: '禁止' }[decision.risk]
+            this.previewResult = `自动识别：${shell ? 'Shell' : 'Agent'}；命令风险：${risk}；若由 Agent 执行：${label}。`
         } catch (error) { this.previewResult = String(error) }
     }
 

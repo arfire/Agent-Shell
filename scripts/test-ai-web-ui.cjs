@@ -153,6 +153,79 @@ async function main () {
     await screen('web-final')
     assert.ok(requests.filter(item => item.url.startsWith('/search')).every(item => item.auth === 'Bearer ui-search-secret'))
     console.log('PASS web settings migration, checkbox visibility, custom model check, persistence, 403 and cancellation')
+
+    const policyKeys = ['autoApprove', 'requireApproval', 'requireSecondApproval', 'deny']
+    const fill = async (selector, value) => inZone(`const input=document.querySelector(${JSON.stringify(selector)});input.value=${JSON.stringify(value)};input.dispatchEvent(new Event('input',{bubbles:true}));return true`)
+    await inZone(`qa.section='policy';return true`)
+    await wait(`!!document.querySelector('#ai-policy-deny')`)
+    for (const key of policyKeys) {
+        assert.equal(await evaluate(`document.querySelector('#ai-policy-${key}').value`), config.policy[key].join('\n'), key + ' loads saved rules')
+    }
+    await evaluate(`document.querySelector('#ai-policy-autoApprove').scrollIntoView({block:'center'});true`)
+    await screen('policy-rules-loaded')
+    const keyboardPattern = '^\\s*id$'
+    await evaluate(`const input=document.querySelector('#ai-policy-autoApprove');input.focus();input.setSelectionRange(input.value.length,input.value.length);true`)
+    await call('Input.insertText', { text: '\n' })
+    await call('Input.insertText', { text: keyboardPattern })
+    assert.deepEqual(await evaluate('qa.model.policy.autoApprove'), [...config.policy.autoApprove, keyboardPattern], 'typing a newline then a rule creates a separate pattern')
+    assert.ok((await evaluate(`document.querySelector('#ai-policy-autoApprove').value`)).endsWith('\n' + keyboardPattern), 'the textarea preserves the inserted line break while typing')
+    const edited = {
+        autoApprove: ['^\\s*whoami$', '  ^literal\\s+spaces$  '],
+        requireApproval: ['^\\s*pwd$'],
+        requireSecondApproval: ['^\\s*hostname$'],
+        deny: ['^\\s*date$'],
+    }
+    for (const key of policyKeys) {
+        await fill('#ai-policy-' + key, '\n' + edited[key].join('\n\n') + '\n  \n')
+        assert.deepEqual(await evaluate(`qa.model.policy.${key}`), edited[key], key + ' filters blank lines and preserves expressions')
+    }
+    await fill('#ai-policy-deny', '  \n\t\n')
+    assert.deepEqual(await evaluate('qa.model.policy.deny'), [], 'an empty editor clears only its rule group')
+    await fill('#ai-policy-deny', edited.deny.join('\n'))
+    await inZone(`qa.section='model';return true`)
+    await wait(`!document.querySelector('#ai-policy-deny')`)
+    await inZone(`qa.section='policy';return true`)
+    await wait(`!!document.querySelector('#ai-policy-deny')`)
+    for (const key of policyKeys) {
+        assert.equal(await evaluate(`document.querySelector('#ai-policy-${key}').value`), edited[key].join('\n'), key + ' survives changing settings pages')
+    }
+    for (const [command, result] of [['whoami', '自动执行'], ['pwd', '需要审批'], ['hostname', '二次确认'], ['date', '拦截']]) {
+        await fill('#ai-command-preview', command)
+        await inZone('qa.preview();return true')
+        assert.ok((await evaluate('qa.previewResult')).includes('若由 Agent 执行：' + result), 'preview uses unsaved rules for ' + command)
+    }
+    await inZone('await qa.save();return true')
+    const policyPath = path.join(directory, 'tabby-ai/config.yaml')
+    saved = yaml.load(fs.readFileSync(policyPath, 'utf8'))
+    for (const key of policyKeys) assert.deepEqual(saved.policy[key], edited[key], key + ' persists to YAML')
+    await call('Page.reload')
+    await delay(500)
+    await wait('!!window.ng?.getComponent?.(document.querySelector("app-root"))?.ready')
+    await inZone(`const app=ng.getComponent(document.querySelector('app-root')).app;app.openNewTab({type:require('tabby-settings').SettingsTabComponent,inputs:{activeTab:'ai'}});return true`)
+    await wait('!!document.querySelector("ash-ai-settings") && !!ng.getComponent(document.querySelector("ash-ai-settings"))?.model')
+    await inZone(`window.qa=ng.getComponent(document.querySelector('ash-ai-settings'));qa.section='policy';return true`)
+    await wait(`!!document.querySelector('#ai-policy-deny')`)
+    for (const key of policyKeys) {
+        assert.equal(await evaluate(`document.querySelector('#ai-policy-${key}').value`), edited[key].join('\n'), key + ' reloads after renderer restart')
+    }
+    const validPolicyFile = fs.readFileSync(policyPath, 'utf8')
+    await fill('#ai-policy-requireSecondApproval', '[')
+    await inZone('await qa.save();return true')
+    assert.equal(fs.readFileSync(policyPath, 'utf8'), validPolicyFile, 'invalid regular expression cannot overwrite the saved configuration')
+    assert.ok(await evaluate(`document.body.innerText.includes('policy.requireSecondApproval contains an invalid regular expression')`), 'invalid expression identifies its rule group')
+    await inZone('await qa.restoreDefaults();return true')
+    for (const key of policyKeys) {
+        assert.equal(await evaluate(`document.querySelector('#ai-policy-${key}').value`), config.policy[key].join('\n'), key + ' restores the current page defaults')
+    }
+    assert.equal(fs.readFileSync(policyPath, 'utf8'), validPolicyFile, 'restoring defaults waits for Save')
+    await inZone('await qa.save();return true')
+    saved = yaml.load(fs.readFileSync(policyPath, 'utf8'))
+    for (const key of policyKeys) assert.deepEqual(saved.policy[key], config.policy[key], key + ' saves restored defaults')
+    assert.equal(saved.llm.model, 'main-test', 'restoring policy defaults preserves model settings')
+    assert.equal(saved.web.model.model, 'research-test', 'restoring policy defaults preserves web settings')
+    await evaluate(`document.querySelector('#ai-policy-deny').scrollIntoView({block:'center'});true`)
+    await screen('policy-rules-bottom')
+    console.log('PASS policy rule editors, blank lines, page switching, unsaved preview, persistence, reload, invalid expression rejection and default restoration')
     console.log('Screenshots: ' + directory)
     await evaluate(`setTimeout(()=>require('@electron/remote').app.exit(0),100);true`)
 }
